@@ -24,18 +24,95 @@
     "PreToolUse": [
       {
         "matcher": "Write|Edit",
-        "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_write.py", "timeout": 10 }]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_write.py",
+            "timeout": 10
+          }
+        ]
       },
       {
         "matcher": "Bash",
-        "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_bash.py", "timeout": 10 }]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_bash.py",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Write|Edit",
-        "hooks": [{ "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/no_fabricated_numbers.py", "timeout": 15 }]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/no_fabricated_numbers.py",
+            "timeout": 15
+          }
+        ]
       }
     ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "allowWrite": [
+        ".",
+        "~/.cache/uv",
+        "/tmp"
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "data.binance.vision",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "github.com",
+        "*.github.com",
+        "*.githubusercontent.com",
+        "arxiv.org",
+        "export.arxiv.org",
+        "api.openalex.org",
+        "api.semanticscholar.org",
+        "api.crossref.org",
+        "api.anthropic.com",
+        "statsig.anthropic.com",
+        "sentry.io",
+        "ntfy.sh"
+      ]
+    },
+    "credentials": {
+      "files": [
+        {
+          "path": "~/.aws",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.ssh",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.config/gcloud",
+          "mode": "deny"
+        }
+      ],
+      "envVars": [
+        {
+          "name": "BINANCE_API_SECRET",
+          "mode": "deny"
+        },
+        {
+          "name": "BYBIT_API_SECRET",
+          "mode": "deny"
+        },
+        {
+          "name": "OPENALGO_API_KEY",
+          "mode": "deny"
+        }
+      ]
+    }
   }
 }
