@@ -61,8 +61,7 @@
     "filesystem": {
       "allowWrite": [
         ".",
-        "~/.cache/uv",
-        "/tmp"
+        "~/.cache/uv"
       ]
     },
     "network": {
@@ -97,6 +96,10 @@
         {
           "path": "~/.config/gcloud",
           "mode": "deny"
+        },
+        {
+          "path": "~/.config/gh",
+          "mode": "deny"
         }
       ],
       "envVars": [
@@ -111,8 +114,18 @@
         {
           "name": "OPENALGO_API_KEY",
           "mode": "deny"
+        },
+        {
+          "name": "GH_TOKEN",
+          "mode": "deny"
+        },
+        {
+          "name": "GITHUB_TOKEN",
+          "mode": "deny"
         }
       ]
-    }
+    },
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false
   }
 }
