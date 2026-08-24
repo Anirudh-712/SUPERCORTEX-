@@ -281,3 +281,114 @@ def test_checks_run_in_declared_order(engine, state):
 def test_approval_records_every_check_it_passed(engine, state):
     approval = engine.approve(intent(), state)
     assert len(approval.checks_passed) == 14
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# The limits file is a boundary, and boundaries are where fail-closed is decided
+# ══════════════════════════════════════════════════════════════════════════════
+# `yaml.safe_load` returns whatever the document says: a mapping, a list, a bare scalar,
+# or None. `load_limits` assumed a mapping and wrote `_digest` into it immediately, so a
+# limits file that was a list or a scalar died with an incidental TypeError from the
+# subscript, and a malformed one escaped as a raw parser traceback. Both are rejections by
+# accident. An operator staring at "list indices must be integers" is not being told that
+# the risk engine refused to start.
+#
+# Never reads 06-risk/limits.yaml. Every case writes its own file under tmp_path.
+def _limits_file(tmp_path, body: str):
+    path = tmp_path / "limits.yaml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_empty_limits_document_is_defined_not_undefined(tmp_path):
+    """An empty file is legal and means "no overrides" — every limit falls back to the
+    code default, which is the conservative one. It is not fail-open."""
+    from supercortex.risk import engine as mod
+
+    limits = mod.load_limits(_limits_file(tmp_path, ""))
+    assert set(limits) == {"_digest"}
+    assert len(limits["_digest"]) == 64
+
+
+def test_comment_only_limits_document_is_defined(tmp_path):
+    from supercortex.risk import engine as mod
+
+    limits = mod.load_limits(_limits_file(tmp_path, "# nothing but a comment\n"))
+    assert set(limits) == {"_digest"}
+
+
+def test_empty_limits_still_enforce_the_conservative_defaults(tmp_path):
+    """The point of the previous test: empty must not mean unlimited."""
+    from supercortex.risk import engine as mod
+
+    limits = mod.load_limits(_limits_file(tmp_path, ""))
+    eng = RiskEngine(limits, clock_ms=NOW)
+    quiet = PortfolioState(
+        equity=100_000.0, marks={"BTCUSDT": 50_000.0}, venues={"BTCUSDT": "BINANCE"},
+        last_data_ts_ms=NOW - 1_000, live_strategies=frozenset({"STR-000001"}),
+    )
+    # default max_order_notional_usd is 500
+    rejection = eng.approve(intent(qty=0.02, price=50_000.0), quiet)
+    assert isinstance(rejection, RiskRejection)
+    assert rejection.check == "order_notional"
+
+
+def test_top_level_list_is_rejected_as_a_risk_error(tmp_path):
+    from supercortex.risk import engine as mod
+
+    with pytest.raises(RiskEngineError, match="mapping"):
+        mod.load_limits(_limits_file(tmp_path, "- max_leverage: 2.0\n- max_drawdown: 5\n"))
+
+
+@pytest.mark.parametrize("body", ["42\n", "hello\n", "3.14\n", "true\n"])
+def test_top_level_scalar_is_rejected_as_a_risk_error(tmp_path, body: str):
+    from supercortex.risk import engine as mod
+
+    with pytest.raises(RiskEngineError, match="mapping"):
+        mod.load_limits(_limits_file(tmp_path, body))
+
+
+def test_malformed_yaml_is_rejected_as_a_risk_error(tmp_path):
+    """A parser traceback is not a risk decision."""
+    from supercortex.risk import engine as mod
+
+    with pytest.raises(RiskEngineError, match="parse"):
+        mod.load_limits(_limits_file(tmp_path, "portfolio:\n  max_leverage: [1, 2\n"))
+
+
+@pytest.mark.parametrize("body", [
+    "- a\n- b\n", "42\n", "hello\n", "portfolio:\n  max_leverage: [1, 2\n",
+])
+def test_no_rejection_escapes_as_a_bare_typeerror_or_parser_error(tmp_path, body: str):
+    """Whatever the document is, the failure must name the risk engine."""
+    import yaml
+
+    from supercortex.risk import engine as mod
+
+    with pytest.raises(RiskEngineError) as caught:
+        mod.load_limits(_limits_file(tmp_path, body))
+    assert not isinstance(caught.value, TypeError | yaml.YAMLError)
+    assert "limits" in str(caught.value).lower()
+
+
+def test_a_rejected_limits_file_is_never_partially_applied(tmp_path):
+    """Fail-closed: no digest, no dict, nothing an engine could be built from."""
+    from supercortex.risk import engine as mod
+
+    for body in ("- a\n", "42\n", "portfolio: [1, 2\n"):
+        with pytest.raises(RiskEngineError):
+            mod.load_limits(_limits_file(tmp_path, body))
+
+
+# ── the check contract ──────────────────────────────────────────────────────────
+def test_every_check_honours_the_risk_check_signature(engine, state):
+    """One callable shape: (OrderIntent, PortfolioState) -> RiskRejection | None.
+
+    The annotation says so; this proves it at runtime for all fourteen, so a check that
+    quietly returned a truthy string or a bare bool could not pass unnoticed.
+    """
+    for name, check in engine._checks():
+        result = check(intent(), state)
+        assert result is None or isinstance(result, RiskRejection), name
+        if isinstance(result, RiskRejection):
+            assert result.check and isinstance(result.action, Action)

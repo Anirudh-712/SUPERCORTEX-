@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -128,6 +129,13 @@ class RiskRejection:
         return False
 
 
+#: Every check is the same shape: look at one intent against one portfolio state, and
+#: either say why it must not happen or say nothing. `None` means "this check has no
+#: objection", never "this check could not run" — a check that cannot evaluate its limit
+#: returns a RiskRejection, which is what fail-closed means in code.
+RiskCheck = Callable[[OrderIntent, PortfolioState], "RiskRejection | None"]
+
+
 class RiskEngineError(RuntimeError):
     pass
 
@@ -145,7 +153,32 @@ def load_limits(path: Path | None = None) -> dict[str, Any]:
             f"on which to approve anything."
         )
     text = target.read_text(encoding="utf-8")
-    data = yaml.safe_load(text) or {}
+
+    # safe_load returns whatever the document says — a mapping, a list, a bare scalar or
+    # None — and every non-mapping used to die on the `_digest` subscript below with an
+    # incidental TypeError, or escape as a raw parser traceback. Those are rejections by
+    # accident. An operator reading "list indices must be integers" has not been told that
+    # the risk engine refused to start, so each case is named here instead.
+    try:
+        parsed = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise RiskEngineError(
+            f"{target} could not be parsed as YAML: {exc}. Fail-closed: limits that cannot "
+            f"be read are not limits."
+        ) from exc
+
+    # An empty document is legal and means "no overrides". It is not fail-open: every
+    # limit then falls back to the default written into the check itself, and those are
+    # the conservative ones.
+    if parsed is None:
+        parsed = {}
+    if not isinstance(parsed, dict):
+        raise RiskEngineError(
+            f"{target} must contain a mapping of limits, not a "
+            f"{type(parsed).__name__}. Fail-closed: nothing here can be read as a limit."
+        )
+
+    data: dict[str, Any] = parsed
     data["_digest"] = hashlib.sha256(text.encode()).hexdigest()
     return data
 
@@ -211,7 +244,9 @@ class RiskEngine:
         return hmac.compare_digest(approval.signature, expected)
 
     # ── the checks, in order ───────────────────────────────────────────────────
-    def _checks(self):
+    def _checks(self) -> tuple[tuple[str, RiskCheck], ...]:
+        """The checks, in the order they run. Order is part of the contract: the kill
+        switch is first because it is the cheapest and the most absolute."""
         return (
             ("kill_switch", self._kill_switch),
             ("strategy_live", self._strategy_live),
@@ -248,7 +283,9 @@ class RiskEngine:
         )
 
     # 1
-    def _kill_switch(self, intent, state):
+    def _kill_switch(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         if KILL_SWITCH_PATH.exists():
             return RiskRejection(
                 "kill_switch",
@@ -259,7 +296,9 @@ class RiskEngine:
         return None
 
     # 2
-    def _strategy_live(self, intent, state):
+    def _strategy_live(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         if intent.strategy_id not in state.live_strategies:
             return RiskRejection(
                 "strategy_live",
@@ -269,7 +308,9 @@ class RiskEngine:
         return None
 
     # 3
-    def _data_freshness(self, intent, state):
+    def _data_freshness(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         max_age = self._kill("data_staleness_seconds", 60.0) * 1000
         if state.last_data_ts_ms is None:
             return RiskRejection(
@@ -287,7 +328,9 @@ class RiskEngine:
         return None
 
     # 4
-    def _order_rate(self, intent, state):
+    def _order_rate(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         limit = self._portfolio("max_orders_per_minute", 60)
         if state.orders_this_minute >= limit:
             return RiskRejection(
@@ -298,7 +341,9 @@ class RiskEngine:
         return None
 
     # 5
-    def _order_notional(self, intent, state):
+    def _order_notional(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         limit = self._per_strategy(intent.strategy_id, "max_order_notional_usd", 500.0)
         if intent.notional > limit:
             return RiskRejection(
@@ -308,7 +353,9 @@ class RiskEngine:
         return None
 
     # 6
-    def _strategy_position(self, intent, state):
+    def _strategy_position(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         pct = self._per_strategy(intent.strategy_id, "max_position_pct", 10.0)
         limit = state.equity * pct / 100.0
         current = (state.strategy_positions.get(intent.strategy_id) or {}).get(
@@ -324,7 +371,9 @@ class RiskEngine:
         return None
 
     # 7
-    def _symbol_concentration(self, intent, state):
+    def _symbol_concentration(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         pct = self._portfolio("max_symbol_exposure_pct", 25.0)
         limit = state.equity * pct / 100.0
         current = state.positions.get(intent.instrument_id, 0.0)
@@ -338,7 +387,9 @@ class RiskEngine:
         return None
 
     # 8
-    def _venue_concentration(self, intent, state):
+    def _venue_concentration(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         pct = self._portfolio("max_venue_exposure_pct", 40.0)
         limit = state.equity * pct / 100.0
         exposure = sum(
@@ -358,7 +409,9 @@ class RiskEngine:
         return None
 
     # 9
-    def _gross_exposure(self, intent, state):
+    def _gross_exposure(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         pct = self._portfolio("max_gross_exposure_pct", 100.0)
         limit = state.equity * pct / 100.0
         current = state.positions.get(intent.instrument_id, 0.0)
@@ -377,7 +430,9 @@ class RiskEngine:
         return None
 
     # 10
-    def _leverage(self, intent, state):
+    def _leverage(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         limit = self._portfolio("max_leverage", 2.0)
         if state.equity <= 0:
             return RiskRejection("leverage", "equity is not positive; leverage is undefined")
@@ -395,7 +450,9 @@ class RiskEngine:
         return None
 
     # 11
-    def _daily_loss(self, intent, state):
+    def _daily_loss(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         pct = self._portfolio("max_daily_loss_pct", 2.0)
         hard = self._kill("daily_loss_pct", 3.0)
         loss_pct = -state.day_pnl / state.equity * 100.0 if state.equity > 0 else 0.0
@@ -414,7 +471,9 @@ class RiskEngine:
         return None
 
     # 12
-    def _strategy_drawdown(self, intent, state):
+    def _strategy_drawdown(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         pct = self._per_strategy(intent.strategy_id, "max_drawdown_pct", 8.0)
         peak = state.strategy_peak_equity.get(intent.strategy_id)
         equity = state.strategy_equity.get(intent.strategy_id)
@@ -430,7 +489,9 @@ class RiskEngine:
         return None
 
     # 13
-    def _portfolio_drawdown(self, intent, state):
+    def _portfolio_drawdown(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         pct = self._portfolio("max_drawdown_pct", 15.0)
         if state.peak_equity is None or state.peak_equity <= 0:
             return None
@@ -444,7 +505,9 @@ class RiskEngine:
         return None
 
     # 14
-    def _liquidation_distance(self, intent, state):
+    def _liquidation_distance(
+        self, intent: OrderIntent, state: PortfolioState
+    ) -> RiskRejection | None:
         multiple = self._portfolio("min_liquidation_distance_pct", 25.0)
         liq = state.liquidation_prices.get(intent.instrument_id)
         if liq is None or liq <= 0:
