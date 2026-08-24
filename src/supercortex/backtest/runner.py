@@ -21,7 +21,7 @@ from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.objects import Money, Price, Quantity
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
-from supercortex.backtest import feed
+from supercortex.backtest import evidence, feed
 from supercortex.costs.model import Trade
 
 MS_TO_NS = 1_000_000
@@ -80,6 +80,11 @@ class BacktestSpec:
     #: Synthetic bars for the golden fixture. When set, no catalog data and no funding is
     #: loaded — the fixture must not depend on market data that changes underneath it.
     synthetic_bars: Any = None
+    #: Which generator produced `synthetic_bars`, and with which effective parameters:
+    #: `{"generator": "module:function", "parameters": {...}}`. A frame does not say what
+    #: made it, so a synthetic run that omits this cannot produce evidence and seals as
+    #: `error` rather than recording a series nobody can recompute.
+    synthetic_source: dict[str, Any] | None = None
 
 
 def resolve_strategy(reference: str) -> tuple[type, type]:
@@ -188,6 +193,11 @@ def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
     )
     engine.add_data(bars)
 
+    # Evidence, taken from the objects actually handed to the engine — after shift and
+    # scramble, not from the frame they were built from. A probe that hashed its
+    # pre-transform input would be indistinguishable from its own baseline.
+    series = evidence.series_facts([(int(b.ts_event), float(b.close)) for b in bars])
+
     funding = []
     if not synthetic:
         funding = feed.load_funding(
@@ -224,6 +234,11 @@ def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
     # would silently corrupt every downstream number.
     our_gross = sum(t.gross_pnl for t in trades)
     diagnostics = {
+        "series": {
+            "source": (evidence.SOURCE_SYNTHETIC if synthetic
+                       else evidence.SOURCE_REGISTERED),
+            **series,
+        },
         "bars": len(bars),
         "funding_events": len(funding),
         "positions_rows": 0 if positions is None else len(positions),

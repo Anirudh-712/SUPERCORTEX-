@@ -14,6 +14,7 @@ from supercortex.falsify import cli as falsify_cli
 from supercortex.health import hook_checks
 from supercortex.lifecycle import machine as lifecycle
 from supercortex.registry import db, experiments
+from supercortex.report.experiment import render_profit_factor
 
 app = typer.Typer(no_args_is_help=True, add_completion=False,
                   help="Project Supercortex — autonomous quant research desk.")
@@ -178,7 +179,7 @@ def exp_run(
 
     stats = Table(show_header=False)
     stats.add_row("trades", f"{t['n_trades']} ({t['win_rate']:.1%} win rate)")
-    stats.add_row("profit factor", f"{t['profit_factor_gross']:.3f}")
+    stats.add_row("profit factor", render_profit_factor(t, ".3f"))
     stats.add_row("break-even PF", f"{t['break_even_profit_factor']:.3f}")
     stats.add_row("clears break-even", "yes" if t["clears_break_even"] else "[red]NO[/]")
     for regime, r in metrics["regimes"].items():

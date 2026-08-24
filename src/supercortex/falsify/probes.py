@@ -61,14 +61,27 @@ def battery(channels: tuple[str, ...] = ("bars", "funding")) -> list[ProbeSpec]:
     return specs
 
 
-def _score(metrics: dict[str, Any]) -> float:
-    """The quantity a probe is compared on.
+def score(metrics: dict[str, Any]) -> float | None:
+    """The quantity a probe is compared on, or None when no comparison exists.
 
     Profit factor rather than PnL: it is the statistic the tax regime actually binds on
     (LRN-000001), and it is scale-free, so a probe that changes trade count does not
     masquerade as a change in edge.
+
+    An unbounded or undefined profit factor has no finite value, so the *relative* change
+    a probe is judged on cannot be computed. That returns None, and the caller refuses —
+    a probe that cannot be compared has not been passed.
+
+    Documents sealed before the state tag existed carry a bare number, and a bare number
+    was always finite: nothing else could be written into strict JSON. Reading them that
+    way is history, not inference.
     """
-    return float(metrics["trades"]["profit_factor_gross"])
+    trades = metrics["trades"]
+    value = trades.get("profit_factor_gross")
+    state = trades.get("profit_factor_gross_state", "finite")
+    if value is None or state != "finite":
+        return None
+    return float(value)
 
 
 def _relative(baseline: float, probed: float) -> float:
@@ -80,9 +93,10 @@ def _relative(baseline: float, probed: float) -> float:
 @dataclass(frozen=True)
 class ChannelVerdict:
     channel: str
-    scramble_delta: float
-    advance_delta: float
-    delay_delta: float
+    #: None where the comparison is undefined — see `score`.
+    scramble_delta: float | None
+    advance_delta: float | None
+    delay_delta: float | None
     status: str
     reasoning: str
 
@@ -94,10 +108,29 @@ class ChannelVerdict:
 def assess(baseline: dict[str, Any], probes: dict[str, dict[str, Any]],
            channel: str) -> ChannelVerdict:
     """Turn three probe runs into one interpretable verdict for a channel."""
-    base = _score(baseline)
-    scramble = _relative(base, _score(probes[f"{channel}-scramble"]))
-    advance = _relative(base, _score(probes[f"{channel}-advance"]))
-    delay = _relative(base, _score(probes[f"{channel}-delay"]))
+    base = score(baseline)
+    scrambled = score(probes[f"{channel}-scramble"])
+    advanced = score(probes[f"{channel}-advance"])
+    delayed = score(probes[f"{channel}-delay"])
+
+    if base is None or scrambled is None or advanced is None or delayed is None:
+        absent = (["the baseline"] if base is None else []) + [
+            f"{channel}-{name}"
+            for name, value in (("scramble", scrambled), ("advance", advanced),
+                                ("delay", delayed))
+            if value is None
+        ]
+        return ChannelVerdict(
+            channel, None, None, None, "UNDEFINED",
+            f"profit factor is undefined for {', '.join(absent)}, so the relative change "
+            f"a probe is judged on does not exist. Cannot compare, therefore not a pass — "
+            f"an all-winning or zero-trade run is a real result, but it is not a "
+            f"measurement of how this channel responds.",
+        )
+
+    scramble = _relative(base, scrambled)
+    advance = _relative(base, advanced)
+    delay = _relative(base, delayed)
 
     channel_matters = abs(scramble) >= MATERIAL or abs(delay) >= MATERIAL
     advance_helps = advance >= MATERIAL

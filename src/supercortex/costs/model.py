@@ -20,6 +20,46 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 
+class ProfitFactorState(StrEnum):
+    """Profit factor is a ratio, and a ratio has three states, not one.
+
+        finite      losses > 0                 -> a number
+        unbounded   wins > 0, losses == 0      -> no finite value exists
+        undefined   wins == 0, losses == 0     -> the ratio is 0/0
+
+    Collapsing the last two into `inf` produced an artifact that could not be serialised
+    as JSON, and collapsing them into a sentinel would produce a number nobody could
+    distinguish from a real one. Both non-finite states are legitimate results — an
+    all-winning run is rare and suspicious, a zero-trade run is a valid negative result —
+    so they are tagged and kept, not thrown away.
+    """
+
+    FINITE = "finite"
+    UNBOUNDED = "unbounded"
+    UNDEFINED = "undefined"
+
+
+def profit_factor_state(wins: float, losses: float) -> ProfitFactorState:
+    if losses > 0:
+        return ProfitFactorState.FINITE
+    if wins > 0:
+        return ProfitFactorState.UNBOUNDED
+    return ProfitFactorState.UNDEFINED
+
+
+def profit_factor_json(value: float, state: ProfitFactorState) -> float | None:
+    """The value as it goes into an artifact: a number, or an explicit null."""
+    return round(value, 6) if state is ProfitFactorState.FINITE else None
+
+
+def format_profit_factor(value: float, state: ProfitFactorState,
+                         spec: str = ".3f") -> str:
+    """For humans. Names the state rather than printing `inf`."""
+    if state is ProfitFactorState.FINITE:
+        return format(value, spec)
+    return str(state.value)
+
+
 class TaxRegime(StrEnum):
     """How the tax authority might treat this activity.
 
@@ -245,6 +285,29 @@ class CostedResult:
     profit_factor_gross: float
     profit_factor_net: float
     break_even_profit_factor: float
+    #: Defaulted so the zero-trade construction below stays positional. Zero wins and zero
+    #: losses is exactly the UNDEFINED state, so the defaults are the correct answer.
+    net_wins: float = 0.0
+    net_losses: float = 0.0
+
+    @property
+    def profit_factor_gross_state(self) -> ProfitFactorState:
+        return profit_factor_state(self.gross_wins, self.gross_losses)
+
+    @property
+    def profit_factor_net_state(self) -> ProfitFactorState:
+        return profit_factor_state(self.net_wins, self.net_losses)
+
+    @property
+    def clears_break_even(self) -> bool:
+        """Unbounded clears any finite floor. Undefined clears nothing — a run that made
+        no trades did not beat the tax regime, it declined to play."""
+        state = self.profit_factor_gross_state
+        if state is ProfitFactorState.UNBOUNDED:
+            return True
+        if state is ProfitFactorState.UNDEFINED:
+            return False
+        return self.profit_factor_gross >= self.break_even_profit_factor
 
     @property
     def win_rate(self) -> float:
@@ -383,6 +446,8 @@ def apply(trades: list[Trade], model: CostModel) -> CostedResult:
         profit_factor_gross=ratio(gross_wins, gross_losses),
         profit_factor_net=ratio(net_wins, net_losses),
         break_even_profit_factor=model.break_even_profit_factor,
+        net_wins=net_wins,
+        net_losses=net_losses,
     )
 
 

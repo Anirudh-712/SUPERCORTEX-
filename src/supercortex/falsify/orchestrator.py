@@ -25,7 +25,7 @@ from typing import TypedDict, TypeGuard
 import numpy as np
 import yaml
 
-from supercortex.costs.model import CostModel, Trade, apply
+from supercortex.costs.model import CostModel, Trade, apply, format_profit_factor
 from supercortex.falsify import benchmark as bench
 from supercortex.falsify import statistics as st
 from supercortex.registry.db import PROJECT_ROOT
@@ -461,8 +461,9 @@ def test_post_tax(ctx: Context, thresholds: Thresholds) -> TestResult:
     return TestResult(
         "G2-post-tax", passed, result.net_after_tax, 0.0,
         f"net after tax under {regime}: {result.net_after_tax:,.2f}. "
-        f"Profit factor {result.profit_factor_gross:.3f} against a break-even of "
-        f"{result.break_even_profit_factor:.3f}.",
+        f"Profit factor "
+        f"{format_profit_factor(result.profit_factor_gross, result.profit_factor_gross_state)}"
+        f" against a break-even of {result.break_even_profit_factor:.3f}.",
     )
 
 

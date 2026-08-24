@@ -11,6 +11,7 @@ from rich.table import Table
 
 from supercortex.falsify import probes
 from supercortex.registry import db, experiments
+from supercortex.report.experiment import render_profit_factor
 
 app = typer.Typer(no_args_is_help=True, help="Falsification battery.")
 console = Console()
@@ -45,18 +46,22 @@ def probe(
             metrics = trial.execute(experiment_id, agent_id=agent, probe=spec)
         trial.write_metrics(experiment_id, metrics)
         results[spec.label] = metrics
-        console.print(f"  {spec.label:<18} PF {metrics['trades']['profit_factor_gross']:.4f}")
+        console.print(f"  {spec.label:<18} PF "
+                      f"{render_profit_factor(metrics['trades'], '.4f')}")
 
     passed, verdicts = probes.verdict(baseline, results, names)
 
     table = Table(title="test 1 — look-ahead battery", show_header=True, header_style="dim")
     for col in ("channel", "scramble", "advance", "delay", "verdict"):
         table.add_column(col, justify="right" if col not in ("channel", "verdict") else "left")
-    colour = {"PASS": "green", "SUSPICIOUS": "red", "INERT": "yellow"}
+    colour = {"PASS": "green", "SUSPICIOUS": "red", "INERT": "yellow",
+              "UNDEFINED": "red"}
+    def delta(value: float | None) -> str:
+        return "—" if value is None else f"{value:+.1%}"
     for v in verdicts:
-        table.add_row(v.channel, f"{v.scramble_delta:+.1%}", f"{v.advance_delta:+.1%}",
-                      f"{v.delay_delta:+.1%}",
-                      f"[{colour[v.status]}]{v.status}[/]")
+        table.add_row(v.channel, delta(v.scramble_delta), delta(v.advance_delta),
+                      delta(v.delay_delta),
+                      f"[{colour.get(v.status, 'red')}]{v.status}[/]")
     console.print(table)
     for v in verdicts:
         console.print(f"\n[bold]{v.channel}[/] — {v.reasoning}")
