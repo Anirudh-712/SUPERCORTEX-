@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TypedDict, TypeGuard
 
 import numpy as np
 import yaml
@@ -33,14 +33,180 @@ from supercortex.registry.db import PROJECT_ROOT
 THRESHOLDS_PATH = PROJECT_ROOT / "falsify" / "thresholds.yaml"
 
 
-def load_thresholds(path: Path | None = None) -> dict[str, Any]:
+# ── the thresholds schema ───────────────────────────────────────────────────────
+# Every section the static battery reads, stated once. These are TypedDicts rather than a
+# loose mapping because each test indexes exactly one section and one field: with
+# `dict[str, Any]` a renamed key is a KeyError at run time, halfway through a battery,
+# after the expensive part has already happened.
+class CostLadder(TypedDict):
+    survive_multiple: float
+
+
+class WalkForward(TypedDict):
+    min_positive_window_fraction: float
+    min_windows: int
+    embargo_fraction: float
+
+
+class PBO(TypedDict):
+    max: float
+
+
+class DeflatedSharpe(TypedDict):
+    min: float
+
+
+class RandomisedEntry(TypedDict):
+    min_percentile: float
+
+
+class MonteCarlo(TypedDict):
+    max_observed_drawdown_percentile: float
+
+
+class Regime(TypedDict):
+    max_single_year_pnl_share: float
+
+
+class PostTax(TypedDict):
+    require_positive_under: str
+
+
+class Benchmark(TypedDict):
+    must_beat_buy_and_hold_after_tax: bool
+    min_excess_fraction: float
+
+
+class Thresholds(TypedDict):
+    """What the static battery requires. Documents may carry more — sections for the
+    dynamic tests, `set_on` — and validation leaves those untouched."""
+
+    version: int
+    cost_ladder: CostLadder
+    walk_forward: WalkForward
+    pbo: PBO
+    deflated_sharpe: DeflatedSharpe
+    randomised_entry: RandomisedEntry
+    monte_carlo: MonteCarlo
+    regime: Regime
+    post_tax: PostTax
+    benchmark: Benchmark
+
+
+class ThresholdsError(RuntimeError):
+    """The thresholds cannot be trusted, so the battery must not run.
+
+    A RuntimeError so existing callers keep catching it, but its own type so a
+    configuration problem is never confused with a test that legitimately failed.
+    """
+
+
+#: field -> kind, per section. The kinds are checked against the parsed YAML, not coerced:
+#: `min_windows: 5.5` is a mistake worth naming, not something to round.
+_SCHEMA: dict[str, dict[str, str]] = {
+    "cost_ladder": {"survive_multiple": "number"},
+    "walk_forward": {
+        "min_positive_window_fraction": "number",
+        "min_windows": "integer",
+        "embargo_fraction": "number",
+    },
+    "pbo": {"max": "number"},
+    "deflated_sharpe": {"min": "number"},
+    "randomised_entry": {"min_percentile": "number"},
+    "monte_carlo": {"max_observed_drawdown_percentile": "number"},
+    "regime": {"max_single_year_pnl_share": "number"},
+    "post_tax": {"require_positive_under": "text"},
+    "benchmark": {
+        "must_beat_buy_and_hold_after_tax": "boolean",
+        "min_excess_fraction": "number",
+    },
+}
+
+
+def _matches(value: object, kind: str) -> bool:
+    """`True` is an `int` in Python, so every numeric kind excludes it explicitly. A
+    threshold written as `true` is a typo, not a limit of 1.0."""
+    if kind == "boolean":
+        return isinstance(value, bool)
+    if kind == "text":
+        return isinstance(value, str)
+    if isinstance(value, bool):
+        return False
+    if kind == "integer":
+        return isinstance(value, int)
+    return isinstance(value, int | float)
+
+
+def _shape_errors(raw: object) -> list[str]:
+    """Every way `raw` falls short of a usable thresholds document.
+
+    All of them, not just the first: an operator repairing a truncated file should see the
+    whole list once rather than rerun the battery to discover the next missing key.
+    """
+    if raw is None:
+        return ["the document is empty; there are no default thresholds to fall back on"]
+    if not isinstance(raw, dict):
+        return [f"the document is a {type(raw).__name__}, expected a mapping of sections"]
+
+    problems: list[str] = []
+    if not _matches(raw.get("version"), "integer"):
+        problems.append("version is missing or is not an integer")
+
+    for section, fields in _SCHEMA.items():
+        block = raw.get(section)
+        if section not in raw:
+            problems.append(f"section {section} is missing")
+            continue
+        if not isinstance(block, dict):
+            problems.append(
+                f"section {section} is a {type(block).__name__}, expected a mapping"
+            )
+            continue
+        for field_name, kind in fields.items():
+            if field_name not in block:
+                problems.append(f"{section}.{field_name} is missing")
+            elif not _matches(block[field_name], kind):
+                problems.append(
+                    f"{section}.{field_name} is "
+                    f"{type(block[field_name]).__name__}, expected {kind}"
+                )
+    return problems
+
+
+def _is_thresholds(raw: object) -> TypeGuard[Thresholds]:
+    return not _shape_errors(raw)
+
+
+def load_thresholds(path: Path | None = None) -> Thresholds:
+    """Read the thresholds, or refuse to produce any.
+
+    Checked once, here, rather than discovered key by key inside individual tests. A
+    battery that runs on a partial document is the rubber stamp this module exists to
+    prevent — and `benchmark` in particular used to default to enabled when its section was
+    absent, so a truncated file produced a full verdict with a gate nobody had configured.
+    """
     target = path or THRESHOLDS_PATH
     if not target.exists():
-        raise RuntimeError(
+        raise ThresholdsError(
             f"{target} is missing. A battery with no thresholds cannot fail anything, "
             f"which makes it a rubber stamp. Refusing to run."
         )
-    return yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    try:
+        raw = yaml.safe_load(target.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ThresholdsError(
+            f"{target} could not be parsed as YAML: {exc}. Refusing to run: thresholds "
+            f"that cannot be read cannot fail anything."
+        ) from exc
+
+    if not _is_thresholds(raw):
+        problems = "; ".join(_shape_errors(raw))
+        raise ThresholdsError(
+            f"{target} is not a usable thresholds document: {problems}. Refusing to run: "
+            f"a battery on partial thresholds silently judges a strategy against limits "
+            f"nobody set."
+        )
+    return raw
 
 
 @dataclass(frozen=True)
@@ -103,7 +269,7 @@ class Context:
 
 
 # ── the tests ───────────────────────────────────────────────────────────────────
-def test_cost_ladder(ctx: Context, thresholds: dict) -> TestResult:
+def test_cost_ladder(ctx: Context, thresholds: Thresholds) -> TestResult:
     """Re-apply the cost model at multiples. Costs no trials — the trades already exist."""
     from dataclasses import replace
 
@@ -128,7 +294,7 @@ def test_cost_ladder(ctx: Context, thresholds: dict) -> TestResult:
     )
 
 
-def test_walk_forward(ctx: Context, thresholds: dict) -> TestResult:
+def test_walk_forward(ctx: Context, thresholds: Thresholds) -> TestResult:
     """Contiguous out-of-sample windows with an embargo between them.
 
     Purging matters when labels overlap; here trades are discrete and non-overlapping, so
@@ -165,7 +331,7 @@ def test_walk_forward(ctx: Context, thresholds: dict) -> TestResult:
     )
 
 
-def test_pbo(ctx: Context, thresholds: dict) -> TestResult:
+def test_pbo(ctx: Context, thresholds: Thresholds) -> TestResult:
     """PBO via CSCV. Requires a declared parameter sweep — without one it cannot run."""
     limit = float(thresholds["pbo"]["max"])
     if ctx.sweep_returns is None:
@@ -188,7 +354,7 @@ def test_pbo(ctx: Context, thresholds: dict) -> TestResult:
     )
 
 
-def test_deflated_sharpe(ctx: Context, thresholds: dict) -> TestResult:
+def test_deflated_sharpe(ctx: Context, thresholds: Thresholds) -> TestResult:
     """The number the registry exists for."""
     minimum = float(thresholds["deflated_sharpe"]["min"])
     returns = ctx.trade_returns()
@@ -208,7 +374,7 @@ def test_deflated_sharpe(ctx: Context, thresholds: dict) -> TestResult:
     )
 
 
-def test_randomised_entry(ctx: Context, thresholds: dict) -> TestResult:
+def test_randomised_entry(ctx: Context, thresholds: Thresholds) -> TestResult:
     """Would a monkey with the same trade profile have done as well?"""
     required = float(thresholds["randomised_entry"]["min_percentile"])
     if not ctx.trades or ctx.prices.size < 10:
@@ -239,7 +405,7 @@ def test_randomised_entry(ctx: Context, thresholds: dict) -> TestResult:
     )
 
 
-def test_monte_carlo_drawdown(ctx: Context, thresholds: dict) -> TestResult:
+def test_monte_carlo_drawdown(ctx: Context, thresholds: Thresholds) -> TestResult:
     """Was the observed drawdown lucky ordering?"""
     limit = float(thresholds["monte_carlo"]["max_observed_drawdown_percentile"])
     if len(ctx.trades) < 10:
@@ -262,7 +428,7 @@ def test_monte_carlo_drawdown(ctx: Context, thresholds: dict) -> TestResult:
     )
 
 
-def test_regime_attribution(ctx: Context, thresholds: dict) -> TestResult:
+def test_regime_attribution(ctx: Context, thresholds: Thresholds) -> TestResult:
     """No single year may carry the result."""
     limit = float(thresholds["regime"]["max_single_year_pnl_share"])
     if not ctx.trades:
@@ -287,7 +453,7 @@ def test_regime_attribution(ctx: Context, thresholds: dict) -> TestResult:
     )
 
 
-def test_post_tax(ctx: Context, thresholds: dict) -> TestResult:
+def test_post_tax(ctx: Context, thresholds: Thresholds) -> TestResult:
     """Positive after the conservative tax reading, or it is not a strategy here."""
     regime = thresholds["post_tax"]["require_positive_under"]
     result = apply(ctx.trades, ctx.model)
@@ -300,10 +466,10 @@ def test_post_tax(ctx: Context, thresholds: dict) -> TestResult:
     )
 
 
-def test_benchmark(ctx: Context, thresholds: dict) -> TestResult:
+def test_benchmark(ctx: Context, thresholds: Thresholds) -> TestResult:
     """Did it beat buying once and holding, after tax?"""
     cfg = thresholds["benchmark"]
-    if not cfg.get("must_beat_buy_and_hold_after_tax", True):
+    if not cfg["must_beat_buy_and_hold_after_tax"]:
         return TestResult("G3-benchmark", True, None, None, "gate disabled in thresholds")
     if ctx.prices.size < 2:
         return TestResult("G3-benchmark", False, None, None,
@@ -323,9 +489,15 @@ def test_benchmark(ctx: Context, thresholds: dict) -> TestResult:
     )
 
 
+#: One shape for every static test: judge this context against these thresholds and say
+#: what happened. A test never returns None and never raises to mean "skipped" — a test
+#: that cannot run returns a TestResult with passed=False, which is what makes
+#: "cannot run is a FAIL" a property of the type rather than a convention.
+StaticTest = Callable[[Context, Thresholds], TestResult]
+
 #: Tests that need no engine re-run. Each declares its trial cost so the battery can
 #: report what it will spend before it spends it.
-STATIC_TESTS: tuple[Callable[[Context, dict], TestResult], ...] = (
+STATIC_TESTS: tuple[StaticTest, ...] = (
     test_cost_ladder,
     test_walk_forward,
     test_pbo,
@@ -338,7 +510,7 @@ STATIC_TESTS: tuple[Callable[[Context, dict], TestResult], ...] = (
 )
 
 #: Tests requiring engine re-runs, with their cost in registered trials.
-DYNAMIC_TEST_COSTS = {
+DYNAMIC_TEST_COSTS: dict[str, int] = {
     "1-lookahead": 6,          # 3 probes x 2 channels
     "2-future-shuffle": 1,
     "4-parameter-neighbourhood": 5,
@@ -369,12 +541,11 @@ class Verdict:
         return f"{len(self.failures)} of {len(self.results)} tests failed: {names}"
 
 
-def run_static_battery(ctx: Context, thresholds: dict | None = None) -> Verdict:
+def run_static_battery(ctx: Context, thresholds: Thresholds | None = None) -> Verdict:
     """Run every test that needs no engine re-run. Costs zero trials."""
     cfg = thresholds if thresholds is not None else load_thresholds()
     results = [fn(ctx, cfg) for fn in STATIC_TESTS]
-    return Verdict(ctx.experiment_id, results, ctx.trials_consumed,
-                   int(cfg.get("version", 0)))
+    return Verdict(ctx.experiment_id, results, ctx.trials_consumed, cfg["version"])
 
 
 def dynamic_trial_cost(channels: int = 2) -> int:

@@ -5,6 +5,8 @@ where "insufficient data" reads as a pass produces a verdict people trust and sh
 """
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -222,3 +224,236 @@ def test_sharpe_variance_source_is_labelled_honestly():
     c.sharpe_variance = 0.02
     _, source = c.effective_sharpe_variance()
     assert "measured" in source
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Thresholds are a boundary, and a battery cannot judge its own configuration
+# ══════════════════════════════════════════════════════════════════════════════
+# `yaml.safe_load` returns whatever the document says, and `load_thresholds` returned it
+# with `or {}` behind it. So an empty, truncated or half-written thresholds file reached
+# the tests, where each one indexed the section it wanted and died on a KeyError deep
+# inside a test — or worse, `benchmark` used `.get(..., True)` and a missing section
+# silently became a default. A battery that runs on partial configuration is exactly the
+# rubber stamp this module exists to avoid, so the file is now checked once, at the door.
+#
+# Never touches falsify/thresholds.yaml. Every case writes its own document under tmp_path.
+VALID_THRESHOLDS = """
+version: 1
+set_on: 2026-08-24
+lookahead:
+  material_change: 0.10
+cost_ladder:
+  survive_multiple: 2.0
+parameter_neighbourhood:
+  min_median_fraction_of_peak: 0.50
+walk_forward:
+  min_positive_window_fraction: 0.60
+  min_windows: 5
+  embargo_fraction: 0.01
+pbo:
+  max: 0.35
+deflated_sharpe:
+  min: 0.95
+randomised_entry:
+  min_percentile: 0.95
+monte_carlo:
+  max_observed_drawdown_percentile: 0.95
+regime:
+  max_single_year_pnl_share: 0.50
+post_tax:
+  require_positive_under: vda_strict
+benchmark:
+  must_beat_buy_and_hold_after_tax: true
+  min_excess_fraction: 0.0
+reproducibility:
+  require_bit_identical: true
+"""
+
+
+def _thresholds_file(tmp_path, body: str):
+    path = tmp_path / "thresholds.yaml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _without(section: str, body: str = VALID_THRESHOLDS) -> str:
+    """The valid document with one whole section removed."""
+    lines, out, dropping = body.splitlines(), [], False
+    for line in lines:
+        if line.startswith(f"{section}:"):
+            dropping = True
+            continue
+        if dropping and (not line or not line.startswith((" ", "\t"))):
+            dropping = False
+        if not dropping:
+            out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def test_a_complete_document_loads(tmp_path):
+    cfg = orch.load_thresholds(_thresholds_file(tmp_path, VALID_THRESHOLDS))
+    assert cfg["version"] == 1
+    assert cfg["pbo"]["max"] == 0.35
+    assert cfg["benchmark"]["must_beat_buy_and_hold_after_tax"] is True
+
+
+def test_sections_the_static_battery_does_not_read_are_preserved(tmp_path):
+    """Validation checks the document; it does not rewrite it."""
+    cfg = orch.load_thresholds(_thresholds_file(tmp_path, VALID_THRESHOLDS))
+    assert "lookahead" in cfg
+    assert "reproducibility" in cfg
+    assert "set_on" in cfg
+
+
+def test_a_complete_document_drives_the_battery_identically(tmp_path):
+    """The whole point of preserving behavior: same thresholds, same verdict."""
+    from_file = orch.run_static_battery(
+        ctx(make_trades(60, 0.4, 0.08, 0.02)),
+        orch.load_thresholds(_thresholds_file(tmp_path, VALID_THRESHOLDS)),
+    )
+    from_repo = orch.run_static_battery(ctx(make_trades(60, 0.4, 0.08, 0.02)))
+    assert [(r.name, r.passed, r.threshold) for r in from_file.results] == \
+           [(r.name, r.passed, r.threshold) for r in from_repo.results]
+
+
+# ── every way the document can be unusable ──────────────────────────────────────
+def test_malformed_yaml_is_a_thresholds_error(tmp_path):
+    with pytest.raises(orch.ThresholdsError, match="parse"):
+        orch.load_thresholds(_thresholds_file(tmp_path, "pbo:\n  max: [1, 2\n"))
+
+
+def test_empty_document_is_a_thresholds_error(tmp_path):
+    """No thresholds at all is not "use the defaults"; there are no defaults."""
+    with pytest.raises(orch.ThresholdsError, match="empty"):
+        orch.load_thresholds(_thresholds_file(tmp_path, ""))
+
+
+def test_comment_only_document_is_a_thresholds_error(tmp_path):
+    with pytest.raises(orch.ThresholdsError, match="empty"):
+        orch.load_thresholds(_thresholds_file(tmp_path, "# thresholds coming soon\n"))
+
+
+@pytest.mark.parametrize("body", ["- pbo\n- regime\n", "0.35\n", "hello\n", "true\n"])
+def test_non_mapping_top_level_is_a_thresholds_error(tmp_path, body: str):
+    with pytest.raises(orch.ThresholdsError, match="mapping"):
+        orch.load_thresholds(_thresholds_file(tmp_path, body))
+
+
+@pytest.mark.parametrize("section", [
+    "cost_ladder", "walk_forward", "pbo", "deflated_sharpe", "randomised_entry",
+    "monte_carlo", "regime", "post_tax", "benchmark",
+])
+def test_a_missing_section_names_that_section(tmp_path, section: str):
+    with pytest.raises(orch.ThresholdsError, match=section):
+        orch.load_thresholds(_thresholds_file(tmp_path, _without(section)))
+
+
+def test_a_missing_version_is_a_thresholds_error(tmp_path):
+    body = VALID_THRESHOLDS.replace("version: 1\n", "")
+    with pytest.raises(orch.ThresholdsError, match="version"):
+        orch.load_thresholds(_thresholds_file(tmp_path, body))
+
+
+@pytest.mark.parametrize("replacement", ["pbo: 0.35", "pbo:\n  - max: 0.35", "pbo: null"])
+def test_a_section_of_the_wrong_shape_is_a_thresholds_error(tmp_path, replacement: str):
+    body = VALID_THRESHOLDS.replace("pbo:\n  max: 0.35", replacement)
+    with pytest.raises(orch.ThresholdsError, match="pbo"):
+        orch.load_thresholds(_thresholds_file(tmp_path, body))
+
+
+def test_a_missing_field_names_section_and_field(tmp_path):
+    body = VALID_THRESHOLDS.replace("  min_windows: 5\n", "")
+    with pytest.raises(orch.ThresholdsError, match=r"walk_forward\.min_windows"):
+        orch.load_thresholds(_thresholds_file(tmp_path, body))
+
+
+@pytest.mark.parametrize(("old", "new", "names"), [
+    ("  min_windows: 5", "  min_windows: five", "walk_forward.min_windows"),
+    ("  min_windows: 5", "  min_windows: 5.5", "walk_forward.min_windows"),
+    ("  max: 0.35", "  max: sometimes", "pbo.max"),
+    ("  survive_multiple: 2.0", "  survive_multiple: null", "cost_ladder.survive_multiple"),
+    ("  must_beat_buy_and_hold_after_tax: true",
+     "  must_beat_buy_and_hold_after_tax: yes please",
+     "benchmark.must_beat_buy_and_hold_after_tax"),
+    ("  require_positive_under: vda_strict", "  require_positive_under: 3",
+     "post_tax.require_positive_under"),
+])
+def test_a_field_of_the_wrong_type_names_the_field(tmp_path, old, new, names):
+    body = VALID_THRESHOLDS.replace(old, new)
+    with pytest.raises(orch.ThresholdsError, match=re.escape(names)):
+        orch.load_thresholds(_thresholds_file(tmp_path, body))
+
+
+def test_a_boolean_is_not_accepted_where_a_number_is_required(tmp_path):
+    """True == 1 in Python. A threshold of `true` is a mistake, not a limit of 1.0."""
+    body = VALID_THRESHOLDS.replace("  max: 0.35", "  max: true")
+    with pytest.raises(orch.ThresholdsError, match=re.escape("pbo.max")):
+        orch.load_thresholds(_thresholds_file(tmp_path, body))
+
+
+# ── the guarantee those cases add up to ─────────────────────────────────────────
+def test_no_failure_escapes_as_a_keyerror_or_parser_error(tmp_path):
+    import yaml
+
+    bodies = [
+        "", "- a\n", "42\n", "pbo:\n  max: [1, 2\n",
+        _without("benchmark"), _without("pbo"),
+        VALID_THRESHOLDS.replace("  min_windows: 5", "  min_windows: five"),
+    ]
+    for body in bodies:
+        with pytest.raises(orch.ThresholdsError) as caught:
+            orch.load_thresholds(_thresholds_file(tmp_path, body))
+        assert not isinstance(caught.value, KeyError | TypeError | yaml.YAMLError)
+        assert "thresholds" in str(caught.value).lower()
+
+
+def test_a_battery_never_runs_on_partial_configuration(tmp_path, monkeypatch):
+    """The failure that matters: `benchmark` used to default to enabled when absent, so a
+    truncated file produced a full verdict with a gate nobody had configured.
+
+    The battery is entered for real. Passing `load_thresholds(path)` as an argument would
+    prove nothing — Python evaluates it before `run_static_battery` is called, so the
+    exception would come from the argument and the body would never be reached either way.
+    So the module's own threshold path is pointed at the partial file, and every static
+    test is replaced by a sentinel that fails the test loudly if anything invokes it.
+    """
+    invocations: list[str] = []
+
+    def sentinel(context: orch.Context, thresholds: orch.Thresholds) -> orch.TestResult:
+        invocations.append("ran")
+        raise AssertionError(
+            "a static test ran against thresholds that failed validation"
+        )
+
+    monkeypatch.setattr(orch, "THRESHOLDS_PATH",
+                        _thresholds_file(tmp_path, _without("benchmark")))
+    monkeypatch.setattr(orch, "STATIC_TESTS", (sentinel,) * len(orch.STATIC_TESTS))
+
+    with pytest.raises(orch.ThresholdsError, match="benchmark"):
+        orch.run_static_battery(ctx(make_trades(60, 0.4, 0.08, 0.02)))
+    assert invocations == [], "the battery must refuse before any test executes"
+
+
+def test_a_valid_file_at_the_module_path_does_reach_the_tests(tmp_path, monkeypatch):
+    """The control for the test above: the sentinel is reachable when the file is good, so
+    `invocations == []` there means "refused", not "wired up wrong"."""
+    invocations: list[str] = []
+
+    def sentinel(context: orch.Context, thresholds: orch.Thresholds) -> orch.TestResult:
+        invocations.append("ran")
+        return orch.TestResult("sentinel", True, None, None, "reached")
+
+    monkeypatch.setattr(orch, "THRESHOLDS_PATH",
+                        _thresholds_file(tmp_path, VALID_THRESHOLDS))
+    monkeypatch.setattr(orch, "STATIC_TESTS", (sentinel, sentinel))
+
+    verdict = orch.run_static_battery(ctx(make_trades(60, 0.4, 0.08, 0.02)))
+    assert invocations == ["ran", "ran"]
+    assert verdict.thresholds_version == 1
+
+
+def test_thresholds_error_is_a_runtime_error(tmp_path):
+    """Existing callers catching RuntimeError keep working."""
+    assert issubclass(orch.ThresholdsError, RuntimeError)
+    with pytest.raises(RuntimeError):
+        orch.load_thresholds(_thresholds_file(tmp_path, "42\n"))

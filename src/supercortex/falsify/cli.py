@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -32,11 +34,12 @@ def probe(
     if not headline.exists():
         console.print("[red]no baseline[/] — run `supercortex exp run` first")
         raise typer.Exit(1)
-    baseline = json.loads(headline.read_text(encoding="utf-8"))
+    baseline: dict[str, Any] = json.loads(headline.read_text(encoding="utf-8"))
 
     console.print(f"{len(specs)} probe runs — each is a registered trial and counts "
                   f"toward the budget.\n")
-    results: dict[str, dict] = {}
+    #: probe label -> that run's metrics document, the shape `probes.verdict` compares.
+    results: dict[str, dict[str, Any]] = {}
     for spec in specs:
         with console.status(f"probe {spec.label}…"):
             metrics = trial.execute(experiment_id, agent_id=agent, probe=spec)
@@ -58,14 +61,14 @@ def probe(
     for v in verdicts:
         console.print(f"\n[bold]{v.channel}[/] — {v.reasoning}")
 
-    _record(experiment_id, verdicts, passed)
+    _record(experiment_id, verdicts)
     console.print(f"\ntest 1: [{'green' if passed else 'red'}]"
                   f"{'PASS' if passed else 'FAIL'}[/]")
     if not passed:
         raise typer.Exit(1)
 
 
-def _artifacts(experiment_id: str):
+def _artifacts(experiment_id: str) -> Path:
     with db.connect() as conn:
         row = conn.execute("SELECT slug FROM experiment WHERE id = ?",
                            (experiment_id,)).fetchone()
@@ -74,7 +77,9 @@ def _artifacts(experiment_id: str):
     return experiments.EXPERIMENTS_DIR / f"{experiment_id}-{row['slug']}" / "artifacts"
 
 
-def _record(experiment_id: str, verdicts, passed: bool) -> None:
+def _record(experiment_id: str, verdicts: list[probes.ChannelVerdict]) -> None:
+    """One row per channel. Each carries its own `v.passed`; the aggregate is the caller's
+    to report and is not stored again here."""
     trials = experiments.trial_count(experiment_id)
     with db.connect() as conn:
         for v in verdicts:
