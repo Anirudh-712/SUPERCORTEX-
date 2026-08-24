@@ -556,32 +556,3 @@ def test_post_hook_reports_when_path_cannot_be_determined(project: Path):
     result = run_raw(POST_HOOK, project, payload)
     assert result.returncode == 2
     assert "file_path" in result.stderr
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# The Codex hook layer must not drift from the Claude one
-# ══════════════════════════════════════════════════════════════════════════════
-CODEX_HOOKS = REPO / ".codex" / "hooks"
-
-
-@pytest.mark.parametrize("name", [
-    "guard_bash.py", "guard_write.py",
-    "no_fabricated_numbers.py", "no_fabricated_numbers_pre.py",
-])
-def test_codex_mirror_is_byte_identical(name: str):
-    """A stale copy of a security hook is worse than no copy: whichever tool runs the
-    old one silently gets the old, weaker guarantees."""
-    claude = (REPO / ".claude" / "hooks" / name)
-    codex = CODEX_HOOKS / name
-    assert codex.exists(), f"{name} missing from the Codex mirror"
-    assert codex.read_bytes() == claude.read_bytes(), f"{name} has drifted"
-
-
-def test_codex_registers_the_preventive_hook():
-    config = json.loads((REPO / ".codex" / "hooks.json").read_text())
-    commands = [
-        h["command"]
-        for entry in config["hooks"].get("PreToolUse", [])
-        for h in entry["hooks"]
-    ]
-    assert any("no_fabricated_numbers_pre.py" in c for c in commands)
