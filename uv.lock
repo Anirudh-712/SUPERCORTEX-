@@ -775,7 +775,7 @@ dev = [
 requires-dist = [
     { name = "arch", specifier = ">=8.0.0" },
     { name = "duckdb", specifier = ">=1.5.5" },
-    { name = "nautilus-trader", specifier = ">=1.231.0" },
+    { name = "nautilus-trader", specifier = ">=1.231.0,<2" },
     { name = "numpy", specifier = ">=2.5.2" },
     { name = "polars", specifier = ">=1.44.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
