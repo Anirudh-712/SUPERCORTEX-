@@ -1,6 +1,9 @@
-# data lake — lives on disk / external SSD, never in git
-data/
-logs/
+# data lake — lives on disk / external SSD, never in git.
+# ROOT-ANCHORED. An unanchored `data/` matches a directory of that name at ANY depth,
+# which silently swallowed the whole of src/supercortex/data/ — four source files that
+# were never committed and existed only on one machine.
+/data/
+/logs/
 *.parquet
 
 # python
