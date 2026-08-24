@@ -1731,7 +1731,7 @@ begins:
 
 | Path | Mechanism | Nautilus support | Reality |
 |---|---|---|---|
-| **A. NSE/BSE currency derivatives** | SEBI broker (Zerodha Kite, Dhan, etc.) | **No adapter exists** — you'd write one | Legal. Liquid in USD/INR. Requires custom adapter work (~2–4 weeks) |
+| **A. NSE/BSE currency derivatives** | SEBI broker via **OpenAlgo** (AGPL-3.0 server + MIT client) | **One** Nautilus adapter covers 34 brokers via OpenAlgo's `CDS`/`BCD` segments | Legal. Liquid in USD/INR. **Corrected 2026-08-24 — see ADR-011.** Days, not weeks |
 | **B. IBKR under LRS** | Interactive Brokers | ✅ stable adapter `[V]` | **Equities/ETFs only** — LRS does not permit leveraged FX/derivatives |
 | **C. Research only** | Dukascopy free tick data | via Parquet | Build FX models, trade none. Zero legal risk. |
 

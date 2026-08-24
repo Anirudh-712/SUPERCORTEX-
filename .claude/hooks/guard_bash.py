@@ -30,6 +30,12 @@ RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"curl[^|;&]*\b(api|fapi|dapi)\.(binance|bybit|okx)\.com"),
      "VENUE: authenticated venue endpoints are unreachable from an agent by design. "
      "Public history comes from data.binance.vision."),
+    # ADR-011: the broker gateway holds T3 credentials and listens on loopback. A network
+    # allowlist that only considers external hosts would leave this wide open.
+    (re.compile(r"(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\]):(5000|8765)\b"),
+     "BROKER GATEWAY: 127.0.0.1:5000 / :8765 is the OpenAlgo broker gateway. It holds live "
+     "broker credentials (T3), so it is off-limits to agents even though it is loopback. "
+     "See 20-decisions/ADR-011."),
     (re.compile(r"\bsupercortex\s+live\b|\blive_trading\b|--live\b"),
      "LIVE TRADING: only the human operator starts a live process. See section 25 of the report."),
     (re.compile(r"python[^|;&]*\b(nautilus_trader|BacktestEngine|BacktestNode)\b"),
