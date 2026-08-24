@@ -22,10 +22,6 @@ from nautilus_trader.model.objects import Money, Price, Quantity
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
 from supercortex.backtest import feed
-from supercortex.backtest.strategies.funding_reversal import (
-    FundingReversal,
-    FundingReversalConfig,
-)
 from supercortex.costs.model import Trade
 
 MS_TO_NS = 1_000_000
@@ -65,6 +61,9 @@ class ProbeSpec:
 class BacktestSpec:
     """The complete, hashable description of a run."""
 
+    #: "module.path:ClassName". Resolved at run time so the strategy is a config value,
+    #: hashed into the trial, rather than something the runner hardcodes.
+    strategy: str = "supercortex.backtest.strategies.trend:DiscreteTrend"
     symbol: str = "BTCUSDT"
     market: str = "um"
     interval: str = "1h"
@@ -78,6 +77,31 @@ class BacktestSpec:
     params: dict[str, Any] | None = None
     #: Falsification probe controls. See `ProbeSpec`.
     probe: ProbeSpec = field(default_factory=ProbeSpec)
+
+
+def resolve_strategy(reference: str) -> tuple[type, type]:
+    """Resolve "module:Class" to (strategy class, its config class).
+
+    The config class is found by convention — `Foo` pairs with `FooConfig` — because a
+    Nautilus strategy and its frozen config are always defined together. Resolving at run
+    time keeps the strategy a *config value*, so it is hashed into the trial like every
+    other parameter rather than being implicit in whichever runner happened to execute.
+    """
+    import importlib
+
+    if ":" not in reference:
+        raise ValueError(f"strategy must be 'module:Class', got {reference!r}")
+    module_path, class_name = reference.split(":", 1)
+    module = importlib.import_module(module_path)
+    try:
+        strategy_cls = getattr(module, class_name)
+        config_cls = getattr(module, f"{class_name}Config")
+    except AttributeError as exc:
+        raise ValueError(
+            f"{reference}: expected both {class_name} and {class_name}Config in "
+            f"{module_path}"
+        ) from exc
+    return strategy_cls, config_cls
 
 
 def fee_free_instrument() -> CryptoPerpetual:
@@ -171,11 +195,13 @@ def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
         funding = [f for f in funding if f.ts_event <= spec.end_ms * MS_TO_NS]
     engine.add_data(funding)
 
-    params = dict(spec.params or {})
+    strategy_cls, config_cls = resolve_strategy(spec.strategy)
     engine.add_strategy(
-        FundingReversal(
-            FundingReversalConfig(
-                instrument_id=instrument.id, bar_type=bar_type, **params
+        strategy_cls(
+            config_cls(
+                instrument_id=instrument.id,
+                bar_type=bar_type,
+                **dict(spec.params or {}),
             )
         )
     )

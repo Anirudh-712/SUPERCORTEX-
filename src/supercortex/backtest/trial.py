@@ -87,7 +87,14 @@ def execute(
 
     # 2. RUN — any failure from here seals the trial as 'error'; it still counts.
     try:
+        strategy_ref = config.get("strategy")
+        if not strategy_ref:
+            raise RuntimeError(
+                f"{experiment_id}: config.yaml declares no `strategy`. The strategy is a "
+                "hashed parameter, not a runner default."
+            )
         spec = BacktestSpec(
+            strategy=strategy_ref,
             symbol=data_cfg.get("symbol", "BTCUSDT"),
             market=data_cfg.get("market", "um"),
             interval=data_cfg.get("interval", "1h"),
