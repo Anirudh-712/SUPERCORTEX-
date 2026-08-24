@@ -1,0 +1,102 @@
+{
+  "cost_model_version": "india-vda-1.0.0",
+  "detail": {
+    "execution_costs": 8277.1,
+    "funding_pnl": 0.0,
+    "gross_pnl": 273028.14,
+    "tax_payable": 100464.28,
+    "tax_total": 150599.2,
+    "tds_carry_cost": 3509.44,
+    "tds_credited": 50134.92,
+    "tds_withheld": 50134.92
+  },
+  "engine": {
+    "bars": 57624,
+    "closed_trades": 44,
+    "engine_realized_pnl": 273028.1378,
+    "fills": 89,
+    "funding_events": 7203,
+    "open_at_end_dropped": 1,
+    "our_gross_pnl": 273028.1378,
+    "positions_rows": 45,
+    "probe": {
+      "bars_scramble": false,
+      "bars_shift": 0,
+      "funding_scramble": false,
+      "funding_shift": 0,
+      "label": "baseline"
+    },
+    "reconciliation_diff": 0.0
+  },
+  "experiment_id": "EXP-000002",
+  "four_numbers": {
+    "gross": 273028.14,
+    "net of TDS drag": 110642.39,
+    "net of costs": 264751.03,
+    "net of tax": 114151.83
+  },
+  "four_numbers_ordered": [
+    [
+      "gross",
+      273028.14
+    ],
+    [
+      "net of costs",
+      264751.03
+    ],
+    [
+      "net of tax",
+      114151.83
+    ],
+    [
+      "net of TDS drag",
+      110642.39
+    ]
+  ],
+  "regime": "vda_strict",
+  "regimes": {
+    "business_income": {
+      "net_after_tax": 179566.26,
+      "survives": true,
+      "tax_total": 85184.78
+    },
+    "vda_no_tds": {
+      "net_after_tax": 114151.83,
+      "survives": true,
+      "tax_total": 150599.2
+    },
+    "vda_strict": {
+      "net_after_tax": 110642.39,
+      "survives": true,
+      "tax_total": 150599.2
+    }
+  },
+  "run_config": {
+    "leverage": 1.0,
+    "seed": 42,
+    "starting_balance": 100000.0
+  },
+  "trades": {
+    "break_even_profit_factor": 1.453488,
+    "clears_break_even": true,
+    "n_trades": 44,
+    "n_wins": 15,
+    "profit_factor_gross": 2.302232,
+    "profit_factor_net": 2.231086,
+    "turnover": 9737768.93,
+    "win_rate": 0.340909
+  },
+  "trial_seq": 1,
+  "trials_consumed_to_date": 1,
+  "verdict": {
+    "contingent_on_tax_question": false,
+    "survives_conservative_regime": true,
+    "taxed_while_losing": false
+  },
+  "window": {
+    "end_ms": 1785283140000,
+    "interval": "1h",
+    "latency_ms": 250,
+    "start_ms": 1577836800000
+  }
+}

@@ -16,6 +16,12 @@ Architecture rationale: `ARCHITECTURE-RESEARCH-REPORT.md`. Read it before propos
 4. **NEVER promote a strategy by editing a file.** Use `supercortex lifecycle promote`.
    The state machine decides, not you.
 5. **If a result looks good, your next job is to try to kill it, not to celebrate it.**
+6. **NEVER originate a strategy.** Strategy origination belongs to the CIO. You build the
+   machine — data, cost model, risk, falsification, promotion gates — and the CIO supplies
+   the hypotheses. You may propose one *when asked*; you may not start a research programme
+   or spend trial budget on an idea nobody commissioned. To validate the engine, use the
+   synthetic fixture in `supercortex.backtest.golden`, never a plausible hypothesis.
+   See [[DEC-000002]] and [[LRN-000003]].
 
 ## Jurisdiction — this changes what is worth researching
 

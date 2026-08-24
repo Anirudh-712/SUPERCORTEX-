@@ -77,6 +77,9 @@ class BacktestSpec:
     params: dict[str, Any] | None = None
     #: Falsification probe controls. See `ProbeSpec`.
     probe: ProbeSpec = field(default_factory=ProbeSpec)
+    #: Synthetic bars for the golden fixture. When set, no catalog data and no funding is
+    #: loaded — the fixture must not depend on market data that changes underneath it.
+    synthetic_bars: Any = None
 
 
 def resolve_strategy(reference: str) -> tuple[type, type]:
@@ -168,7 +171,9 @@ def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
     )
     engine.add_instrument(instrument)
 
-    frame = feed.load_bars_frame(spec.symbol, spec.market, spec.interval)
+    synthetic = spec.synthetic_bars is not None
+    frame = (spec.synthetic_bars if synthetic
+             else feed.load_bars_frame(spec.symbol, spec.market, spec.interval))
     if spec.start_ms is not None:
         frame = frame.filter(pl.col("ts_ms") >= spec.start_ms)
     if spec.end_ms is not None:
@@ -183,17 +188,19 @@ def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
     )
     engine.add_data(bars)
 
-    funding = feed.load_funding(
-        spec.symbol, spec.market, instrument.id,
-        shift_intervals=spec.probe.funding_shift,
-        scramble=spec.probe.funding_scramble,
-        seed=spec.seed,
-    )
-    if spec.start_ms is not None:
-        funding = [f for f in funding if f.ts_event >= spec.start_ms * MS_TO_NS]
-    if spec.end_ms is not None:
-        funding = [f for f in funding if f.ts_event <= spec.end_ms * MS_TO_NS]
-    engine.add_data(funding)
+    funding = []
+    if not synthetic:
+        funding = feed.load_funding(
+            spec.symbol, spec.market, instrument.id,
+            shift_intervals=spec.probe.funding_shift,
+            scramble=spec.probe.funding_scramble,
+            seed=spec.seed,
+        )
+        if spec.start_ms is not None:
+            funding = [f for f in funding if f.ts_event >= spec.start_ms * MS_TO_NS]
+        if spec.end_ms is not None:
+            funding = [f for f in funding if f.ts_event <= spec.end_ms * MS_TO_NS]
+        engine.add_data(funding)
 
     strategy_cls, config_cls = resolve_strategy(spec.strategy)
     engine.add_strategy(
