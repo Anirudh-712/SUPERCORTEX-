@@ -1,0 +1,39 @@
+# EXP-000002 — the ONLY source of parameters.
+# Every value here is hashed into the trial. Nothing is passed on the command line.
+#
+# Only `params.lookback_days` is searched, over the grid declared in hypothesis.md.
+# Everything else is FIXED before the first trial and is not a free parameter.
+experiment_id: EXP-000002
+strategy: supercortex.backtest.strategies.trend:DiscreteTrend
+seed: 42
+
+starting_balance: 100000.0
+leverage: 1.0
+latency_ms: 250
+
+params:
+  lookback_days: 90            # SEARCHED: {30, 60, 90, 120, 180}
+
+  # --- fixed before trial 1, not searched ---
+  entry_threshold: 0.0         # act on the sign of the trailing return
+  rebalance_hour_utc: 0        # 00:00 UTC, never local time
+  min_hold_bars: 168           # 7 days — discourages churn the tax code punishes
+  trade_size_pct: 0.50
+  allow_long: true
+  allow_short: true
+  # Position changes ONLY on signal flip. No volatility rebalancing: under s.115BBH
+  # every adjustment is a taxable disposal, so turnover is a design variable.
+  rebalance_on_vol_drift: false
+
+data:
+  symbol: BTCUSDT
+  market: um
+  interval: 1h
+  start_ms: 1577836800000      # 2020-01-01T00:00:00Z — full perp history
+  end_ms:   1785283140000      # 2026-07-31T23:59:00Z
+  datasets:
+    - DATA-000002              # 1m klines
+    - DATA-000003              # funding rate (settled as a cash flow, not a signal)
+
+cost_model:
+  version: india-vda-1.0.0

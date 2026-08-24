@@ -10,6 +10,7 @@ from rich.table import Table
 from supercortex import __version__
 from supercortex.costs import cli as costs_cli
 from supercortex.data import cli as data_cli
+from supercortex.lifecycle import machine as lifecycle
 from supercortex.registry import db, experiments
 
 app = typer.Typer(no_args_is_help=True, add_completion=False,
@@ -18,6 +19,8 @@ exp_app = typer.Typer(no_args_is_help=True, help="Experiments and trials.")
 app.add_typer(exp_app, name="exp")
 app.add_typer(data_cli.app, name="data")
 app.add_typer(costs_cli.app, name="costs")
+life_app = typer.Typer(no_args_is_help=True, help="Strategy lifecycle transitions.")
+app.add_typer(life_app, name="lifecycle")
 
 console = Console()
 DISK_FLOOR_GB = 2.0
@@ -278,3 +281,55 @@ def doctor() -> None:
 
 if __name__ == "__main__":
     app()
+
+
+@life_app.command("state")
+def lifecycle_state(experiment_id: str = typer.Argument(...)) -> None:
+    """Current state and the full transition history."""
+    state = lifecycle.current_state(experiment_id)
+    console.print(f"[bold]{experiment_id}[/] is [bold]{state}[/]")
+    allowed = lifecycle.TRANSITIONS.get(state, set())
+    console.print(f"  may go to: {', '.join(sorted(allowed)) or 'nowhere'} (or KILLED)")
+    events = lifecycle.history(experiment_id)
+    if not events:
+        console.print("  no transitions recorded")
+        return
+    table = Table(show_header=True, header_style="dim")
+    for col in ("when", "from", "to", "decision", "approved by"):
+        table.add_column(col)
+    for e in events:
+        table.add_row(str(e["at"]), str(e["from_state"] or "-"), str(e["to_state"]),
+                      str(e["gate_report_path"] or "-"), str(e["approved_by"] or "-"))
+    console.print(table)
+
+
+@life_app.command("promote")
+def lifecycle_promote(
+    experiment_id: str = typer.Argument(...),
+    to: str = typer.Option(..., "--to"),
+    approved_by: str | None = typer.Option(None, "--approved-by"),
+    decision: str | None = typer.Option(None, "--decision"),
+) -> None:
+    """Advance a state. Refuses whenever a gate cannot be verified."""
+    try:
+        was = lifecycle.transition(experiment_id, to.upper(),
+                                   decision_id=decision, approved_by=approved_by)
+    except (lifecycle.TransitionRefused, KeyError) as exc:
+        console.print(f"[red]refused:[/] {exc}")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]{experiment_id}[/] {was} -> {to.upper()}")
+
+
+@life_app.command("kill")
+def lifecycle_kill(
+    experiment_id: str = typer.Argument(...),
+    decision: str = typer.Option(..., "--decision", help="DEC-NNNNNN note recording why."),
+) -> None:
+    """Kill a line of research. Requires a decision note; a killed experiment is a result."""
+    try:
+        was = lifecycle.transition(experiment_id, "KILLED", decision_id=decision)
+    except (lifecycle.TransitionRefused, KeyError) as exc:
+        console.print(f"[red]refused:[/] {exc}")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]{experiment_id}[/] {was} -> KILLED  ({decision})")
+    console.print("[dim]A killed experiment is evidence. Mine it later.[/]")
