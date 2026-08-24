@@ -25,12 +25,17 @@ to kill strategies, a cost model that knows India taxes gains at 30% with no los
 and a set of hooks that make an agent physically unable to write a number it did not
 compute.
 
+The first thing the cost model told us: under s.115BBH the break-even **profit factor** is
+1.4535, and once frictions are included a day-horizon strategy needs 1.92. Sharpe ratio
+cannot see that constraint. Run `uv run supercortex costs breakeven`.
+
 ## Status
 
 | Phase | State |
 |---|---|
 | 0 · Foundation | ✅ tree, CLAUDE.md, hooks, settings |
 | 1 · Registry + second brain | ✅ registry, CLI, anti-fabrication hook, tests |
-| 2 · Data | ⬜ next |
-| 3 · Backtest + cost model | ⬜ |
-| 4 · Falsification engine | ⬜ |
+| 2 · Data | ✅ klines, funding, open interest — verified, carded, gap-inventoried |
+| 3 · Cost model | ✅ India VDA model, 3 tax regimes, 100% covered |
+| 4 · Backtest | ⬜ next — Nautilus, first registered trial |
+| 5 · Falsification engine | ⬜ |

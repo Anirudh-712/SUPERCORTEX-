@@ -81,6 +81,12 @@ losing hands, and the house takes 1% every time you push chips across the table.
 | Multi-day swing | 50–200 | ~0.5–2% | Marginal |
 | Weekly/monthly trend, carry, funding-harvest | 12–50 | ~0.1–0.5% | **Yes** |
 
+> **Quantified 2026-08-24 (LRN-000001).** This table was the qualitative sketch. The cost
+> model now gives the threshold directly, and it is stricter than assumed: the binding
+> axis is **holding horizon**, not round-trips per year, and required profit factor runs
+> 1.52 (months) · 1.63 (weeks) · **1.92 (days — "marginal" was generous)** · 2.85
+> (intraday) · 4.95 (scalping) · 15.44 (HFT). Run `supercortex costs breakeven`.
+
 **Decision this forces:** Supercortex must be a **low-turnover, medium-horizon research desk**.
 The 30% / no-loss-offset / 1% TDS structure must be a **first-class cost model in the backtester
 from day one**, not an afterthought at tax time. A strategy that is profitable pre-tax and
@@ -1513,7 +1519,21 @@ for the losers. **A high-win-rate, small-edge strategy is a tax trap in India; a
 large-winner (positive-skew, trend-following) strategy is comparatively tax-efficient.** That single
 sentence should shape your entire research agenda, and it falls straight out of the cost model.
 
-Report every strategy as: **gross → net of costs → net of TDS → net of tax**. Four numbers, always.
+Report every strategy as: **gross → net of costs → net of tax → net of TDS drag**.
+Four numbers, always, plus **profit factor**.
+
+> **Corrected 2026-08-24 (see LRN-000001, ADR-012).** This section originally ordered the
+> ladder `gross → net of costs → net of TDS → net of tax`, which treated TDS as an additive
+> cost. It is a *creditable prepayment*: credited against the liability, excess refunded
+> after assessment. Ordering it third produces a ladder whose last rung is **higher** than
+> its third, because the credit comes back. TDS belongs last, as the drag it actually is —
+> carry on idle capital plus anything unrecoverable. Implemented in
+> `supercortex.costs.model`, with a test asserting the ladder is monotonic.
+>
+> Two further corrections from the same work: **TDS is withheld on losing disposals too**
+> (s.194S taxes the transfer, not the gain), and **profit factor — not Sharpe — is the
+> binding constraint**, with a closed-form floor of **PF ≥ 1.4535** and a horizon-dependent
+> real threshold running from 1.52 (months) to 15.44 (HFT).
 
 ---
 
