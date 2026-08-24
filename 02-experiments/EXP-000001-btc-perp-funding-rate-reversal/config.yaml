@@ -1,0 +1,14 @@
+# EXP-000001 — the ONLY source of parameters.
+# Never pass a parameter on the command line: it would not be hashed,
+# and the trial would not be reproducible.
+experiment_id: EXP-000001
+strategy: null
+seed: 42
+
+params: {}
+
+data:
+  datasets: []
+
+cost_model:
+  version: india-vda-1.0.0
