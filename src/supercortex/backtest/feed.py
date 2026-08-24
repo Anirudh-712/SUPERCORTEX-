@@ -10,6 +10,7 @@ is worthless. `ts_event` must be the interval's **close**.
 """
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import polars as pl
@@ -23,6 +24,10 @@ CATALOG = PROJECT_ROOT / "data" / "catalog"
 MS_TO_NS = 1_000_000
 
 RESAMPLE = {"1h": "1h", "4h": "4h", "1d": "1d"}
+
+#: Binance USD-M funding settles every 8 hours. Verified constant across the whole
+#: BTCUSDT history in DATA-000003 (`funding_intervals_seen: [8]`).
+FUNDING_INTERVAL_MS = 8 * 3_600_000
 
 
 def load_bars_frame(symbol: str, market: str, interval: str) -> pl.DataFrame:
@@ -61,15 +66,28 @@ def to_bars(
     interval: str,
     *,
     shift_bars: int = 0,
+    scramble: bool = False,
+    seed: int = 42,
 ) -> list[Bar]:
     """Build Nautilus bars, stamping `ts_event` at the interval CLOSE.
 
-    `shift_bars` exists for the look-ahead probe (falsification test 1). Shifting the
-    stamp *earlier* by one interval hands the strategy each bar before it completed. If a
-    strategy's performance does not collapse under that, it was not using recent
-    information; if it *improves*, the strategy already had a leak.
+    Probe control. ``shift_bars > 0`` moves the stamp **earlier**, handing the strategy
+    each bar before it completed — granting look-ahead. ``shift_bars < 0`` delays it.
+
+    The sign convention is deliberately the same as `load_funding`, and is preserved from
+    the sealed EXP-000001 probe artifact so historical runs stay interpretable.
     """
     step = interval_ms(interval)
+    if scramble:
+        # Permute the OHLC block across rows, keeping timestamps and ordering. Destroys
+        # the price series' information while preserving its shape and cadence.
+        rng = random.Random(seed)
+        order = list(range(frame.height))
+        rng.shuffle(order)
+        price_cols = ["open", "high", "low", "close", "volume"]
+        shuffled = frame.select(price_cols)[order]
+        frame = frame.drop(price_cols).hstack(shuffled)
+
     bars: list[Bar] = []
     for row in frame.iter_rows(named=True):
         close_ms = row["ts_ms"] + step - shift_bars * step
@@ -88,23 +106,46 @@ def to_bars(
     return bars
 
 
-def load_funding(symbol: str, market: str, instrument_id: InstrumentId) -> list[FundingRateUpdate]:
+def load_funding(
+    symbol: str,
+    market: str,
+    instrument_id: InstrumentId,
+    *,
+    shift_intervals: int = 0,
+    scramble: bool = False,
+    seed: int = 42,
+) -> list[FundingRateUpdate]:
     """Funding events as native Nautilus data.
 
-    `calc_time` is the settlement instant, so it is already the event time — no close
-    adjustment applies the way it does for bars.
+    `calc_time` is the settlement instant, so it is already the event time — no bar-close
+    adjustment applies.
+
+    Probe controls, using the same sign convention as `to_bars`:
+
+    * ``shift_intervals > 0`` — events arrive **earlier** than they settled, granting
+      look-ahead into the funding channel.
+    * ``shift_intervals < 0`` — events arrive **later**, delaying the information.
+    * ``scramble`` — permute the rates while keeping the timestamps. This is the test that
+      asks whether the strategy uses the series' *information* at all, as opposed to merely
+      its presence. Without it, a shift probe that shows nothing is uninterpretable.
     """
     path = CATALOG / "funding_rate" / f"{symbol}.{market}" / "funding.parquet"
     frame = pl.read_parquet(path).sort("ts_ms")
-    return [
-        FundingRateUpdate(
-            instrument_id,
-            float(row["funding_rate"]),
-            ts_event=row["ts_ms"] * MS_TO_NS,
-            ts_init=row["ts_ms"] * MS_TO_NS,
-        )
-        for row in frame.iter_rows(named=True)
+
+    rates = [float(r) for r in frame["funding_rate"].to_list()]
+    if scramble:
+        rng = random.Random(seed)
+        rng.shuffle(rates)
+
+    step = FUNDING_INTERVAL_MS
+    stamps = [int(t) - shift_intervals * step for t in frame["ts_ms"].to_list()]
+
+    events = [
+        FundingRateUpdate(instrument_id, rate, ts_event=ts * MS_TO_NS, ts_init=ts * MS_TO_NS)
+        for ts, rate in zip(stamps, rates, strict=True)
     ]
+    events.sort(key=lambda e: e.ts_event)
+    return events
 
 
 def common_window(symbol: str, market: str) -> tuple[int, int]:

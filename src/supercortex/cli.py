@@ -10,6 +10,7 @@ from rich.table import Table
 from supercortex import __version__
 from supercortex.costs import cli as costs_cli
 from supercortex.data import cli as data_cli
+from supercortex.falsify import cli as falsify_cli
 from supercortex.lifecycle import machine as lifecycle
 from supercortex.registry import db, experiments
 
@@ -19,6 +20,7 @@ exp_app = typer.Typer(no_args_is_help=True, help="Experiments and trials.")
 app.add_typer(exp_app, name="exp")
 app.add_typer(data_cli.app, name="data")
 app.add_typer(costs_cli.app, name="costs")
+app.add_typer(falsify_cli.app, name="falsify")
 life_app = typer.Typer(no_args_is_help=True, help="Strategy lifecycle transitions.")
 app.add_typer(life_app, name="lifecycle")
 

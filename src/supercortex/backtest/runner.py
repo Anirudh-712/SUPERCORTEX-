@@ -5,7 +5,7 @@ contract the registry records, and it is what makes a trial evidence rather than
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -32,6 +32,36 @@ MS_TO_NS = 1_000_000
 
 
 @dataclass(frozen=True)
+class ProbeSpec:
+    """Deliberate corruption of one input channel, to interrogate the strategy.
+
+    Sign convention throughout: **positive shift = data arrives earlier = look-ahead
+    granted**; negative delays it. `scramble` permutes a series' content while keeping its
+    timestamps.
+    """
+
+    bars_shift: int = 0
+    bars_scramble: bool = False
+    funding_shift: int = 0
+    funding_scramble: bool = False
+    label: str = "baseline"
+
+    @property
+    def is_baseline(self) -> bool:
+        return not (self.bars_shift or self.bars_scramble
+                    or self.funding_shift or self.funding_scramble)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "bars_shift": self.bars_shift,
+            "bars_scramble": self.bars_scramble,
+            "funding_shift": self.funding_shift,
+            "funding_scramble": self.funding_scramble,
+        }
+
+
+@dataclass(frozen=True)
 class BacktestSpec:
     """The complete, hashable description of a run."""
 
@@ -46,8 +76,8 @@ class BacktestSpec:
     latency_ms: int = 250
     seed: int = 42
     params: dict[str, Any] | None = None
-    #: Falsification probe 1: hand each bar to the strategy one interval early.
-    shift_bars: int = 0
+    #: Falsification probe controls. See `ProbeSpec`.
+    probe: ProbeSpec = field(default_factory=ProbeSpec)
 
 
 def fee_free_instrument() -> CryptoPerpetual:
@@ -122,11 +152,19 @@ def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
 
     bars = feed.to_bars(
         frame, bar_type, instrument.price_precision, instrument.size_precision,
-        spec.interval, shift_bars=spec.shift_bars,
+        spec.interval,
+        shift_bars=spec.probe.bars_shift,
+        scramble=spec.probe.bars_scramble,
+        seed=spec.seed,
     )
     engine.add_data(bars)
 
-    funding = feed.load_funding(spec.symbol, spec.market, instrument.id)
+    funding = feed.load_funding(
+        spec.symbol, spec.market, instrument.id,
+        shift_intervals=spec.probe.funding_shift,
+        scramble=spec.probe.funding_scramble,
+        seed=spec.seed,
+    )
     if spec.start_ms is not None:
         funding = [f for f in funding if f.ts_event >= spec.start_ms * MS_TO_NS]
     if spec.end_ms is not None:
@@ -159,7 +197,7 @@ def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
         "fills": 0 if fills is None else len(fills),
         "closed_trades": len(trades),
         "open_at_end_dropped": dropped_open,
-        "shift_bars": spec.shift_bars,
+        "probe": spec.probe.as_dict(),
         "engine_realized_pnl": round(engine_pnl, 6),
         "our_gross_pnl": round(our_gross, 6),
         "reconciliation_diff": round(our_gross - engine_pnl, 6),

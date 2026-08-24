@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from supercortex.backtest.runner import BacktestSpec
+from supercortex.backtest.runner import BacktestSpec, ProbeSpec
 from supercortex.backtest.runner import run as run_backtest
 from supercortex.costs.model import CostModel, TaxRegime, apply, compare_regimes
 from supercortex.registry import db, experiments
@@ -62,7 +62,7 @@ def execute(
     *,
     agent_id: str | None = None,
     note: str | None = None,
-    shift_bars: int = 0,
+    probe: ProbeSpec | None = None,
     allow_dirty: bool = False,
 ) -> dict[str, Any]:
     """Register, run, cost, seal. Returns the metrics that were written."""
@@ -81,7 +81,7 @@ def execute(
         cost_model_version=model.version,
         seed=int(config.get("seed", 42)),
         agent_id=agent_id,
-        note=note or (f"lookahead probe shift={shift_bars}" if shift_bars else None),
+        note=note or (None if probe is None or probe.is_baseline else f"probe: {probe.label}"),
         strict=not allow_dirty,
     )
 
@@ -98,7 +98,7 @@ def execute(
             latency_ms=int(config.get("latency_ms", 250)),
             seed=int(config.get("seed", 42)),
             params=config.get("params") or {},
-            shift_bars=shift_bars,
+            probe=probe or ProbeSpec(),
         )
         trades, diagnostics = run_backtest(spec)
     except Exception:
@@ -112,7 +112,7 @@ def execute(
 
     # 4. SEAL.
     experiments.close_trial(experiment_id, seq, "ok", metrics,
-                            is_headline=(shift_bars == 0))
+                            is_headline=(probe is None or probe.is_baseline))
     return metrics
 
 
@@ -202,8 +202,9 @@ def write_metrics(experiment_id: str, metrics: dict[str, Any]) -> Path:
         ).fetchone()["slug"]
     artifacts = experiments.EXPERIMENTS_DIR / f"{experiment_id}-{slug}" / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
-    shift = metrics.get("engine", {}).get("shift_bars", 0)
-    name = "metrics.json" if not shift else f"metrics-probe-shift{shift}.json"
+    probe = metrics.get("engine", {}).get("probe") or {}
+    label = probe.get("label", "baseline")
+    name = "metrics.json" if label == "baseline" else f"metrics-probe-{label}.json"
     path = artifacts / name
     path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
     return path
