@@ -1,0 +1,51 @@
+# Falsification thresholds — GIT-TRACKED ON PURPOSE.
+#
+# Loosening any value here shows up in `git diff` and requires a DEC-* note in the same
+# commit. You cannot quietly move the goalposts after seeing a result; that is p-hacking
+# with extra steps, and the whole battery is worthless if the bar moves to meet the number.
+#
+# Every threshold was set BEFORE any strategy was supplied by the CIO.
+version: 1
+set_on: 2026-08-24
+
+lookahead:
+  material_change: 0.10          # relative move in profit factor treated as signal
+
+cost_ladder:
+  survive_multiple: 2.0          # must still profit at 2x modelled costs
+
+parameter_neighbourhood:
+  min_median_fraction_of_peak: 0.50   # a spike is a fluke, not an optimum
+
+walk_forward:
+  min_positive_window_fraction: 0.60
+  min_windows: 5
+  embargo_fraction: 0.01         # of the sample, dropped after each test window
+
+pbo:
+  max: 0.35                      # Bailey et al. call 0.5 a coin flip; we want better
+
+deflated_sharpe:
+  min: 0.95                      # P(true Sharpe > 0 | this was the best of N looks)
+
+randomised_entry:
+  min_percentile: 0.95           # must beat 95% of monkeys with the same trade profile
+
+monte_carlo:
+  max_observed_drawdown_percentile: 0.95   # observed MaxDD must sit inside the band
+
+regime:
+  max_single_year_pnl_share: 0.50
+
+post_tax:
+  require_positive_under: vda_strict
+
+benchmark:
+  # A long-biased strategy in a rising market beats nothing at all. Buy-and-hold pays ONE
+  # set of frictions and ONE taxable disposal; a strategy pays them on every round trip.
+  # This gate binds harder than profit factor for anything directional.
+  must_beat_buy_and_hold_after_tax: true
+  min_excess_fraction: 0.0       # strictly greater; no ties
+
+reproducibility:
+  require_bit_identical: true
