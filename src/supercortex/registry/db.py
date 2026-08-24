@@ -64,8 +64,19 @@ def allocate_id(conn: sqlite3.Connection, prefix: str) -> str:
 
 
 # ── provenance helpers ──────────────────────────────────────────────────────────
-def git_commit(strict: bool = True) -> str:
-    """Return HEAD. Refuse on a dirty tree: a trial you cannot reproduce is not evidence."""
+# Only these determine a trial's result, so only these must be committed for the run
+# to be reproducible. The registry, artifacts and notes are *outputs* — the ledger
+# recording the run is not an input to it, and requiring it to be clean would
+# deadlock (registering an experiment dirties the registry, which blocks the trial).
+REPRODUCIBILITY_INPUTS = ("src", "pyproject.toml", "uv.lock")
+
+
+def git_commit(strict: bool = True, extra_inputs: tuple[str, ...] = ()) -> str:
+    """Return HEAD. Refuse if any reproducibility input is uncommitted.
+
+    A trial recorded against uncommitted strategy code cannot be re-run, so it is not
+    evidence. `extra_inputs` lets a caller add the experiment's own config and strategy.
+    """
     def run(*args: str) -> str:
         return subprocess.run(
             ["git", *args], cwd=PROJECT_ROOT, capture_output=True, text=True, check=True
@@ -76,11 +87,16 @@ def git_commit(strict: bool = True) -> str:
     except subprocess.CalledProcessError as exc:  # no commits yet
         raise RuntimeError("no git commits yet — commit before running trials") from exc
 
-    if strict and run("status", "--porcelain"):
-        raise RuntimeError(
-            "git tree is dirty. A trial recorded against uncommitted code cannot be "
-            "reproduced, so it is not evidence. Commit (or stash) first."
-        )
+    if strict:
+        watched = [*REPRODUCIBILITY_INPUTS, *extra_inputs]
+        dirty = run("status", "--porcelain", "--", *watched)
+        if dirty:
+            files = ", ".join(line[3:] for line in dirty.splitlines()[:6])
+            raise RuntimeError(
+                f"uncommitted changes to reproducibility inputs: {files}. "
+                "A trial recorded against uncommitted code cannot be re-run, so it is "
+                "not evidence. Commit (or stash) first."
+            )
     return commit
 
 

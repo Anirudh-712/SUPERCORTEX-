@@ -25,3 +25,8 @@ CLAUDE.local.md
 
 # literature PDFs (disk + copyright)
 01-research/literature/pdf/
+
+# sqlite sidecars
+*.sqlite-wal
+*.sqlite-shm
+.doctor-probe.sqlite*

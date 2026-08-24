@@ -130,7 +130,12 @@ def open_trial(
                 "means the hypothesis is committed BEFORE the first trial runs. Commit it."
             )
 
-        commit = git_commit(strict=strict)
+        # The experiment's own config and strategy are inputs too — they must be committed.
+        exp_rel = exp_dir.relative_to(PROJECT_ROOT).as_posix()
+        commit = git_commit(
+            strict=strict,
+            extra_inputs=(f"{exp_rel}/config.yaml", f"{exp_rel}/strategy.py"),
+        )
         seq = (
             conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM trial WHERE experiment_id = ?",
