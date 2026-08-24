@@ -216,3 +216,65 @@ def test_days_is_inclusive():
     assert [d.isoformat() for d in got] == [
         "2024-02-27", "2024-02-28", "2024-02-29", "2024-03-01", "2024-03-02"
     ]
+
+
+# ── the ts_ms contract ──────────────────────────────────────────────────────────
+# Every reader ends its timestamp expression with `.cast(pl.Int64)`, and all three live L1
+# datasets carry ts_ms=Int64. The validators depend on that: they subtract the bounds,
+# floor-divide by the step and divide by 1000 to build the ISO range. Nothing checked it,
+# so a frame that violated the contract produced a plausible-looking QualityReport instead
+# of a failure — the worst outcome available to a system whose job is not fooling itself.
+def test_epoch_bounds_returns_the_first_and_last_millisecond():
+    ts = pl.Series("ts_ms", [3_000, 1_000, 2_000], dtype=pl.Int64)
+    assert canonical._epoch_bounds(ts) == (1_000, 3_000)
+
+
+@pytest.mark.parametrize("dtype", [pl.Float64, pl.Int32, pl.UInt64])
+def test_non_int64_timestamps_are_rejected_not_silently_reported(dtype):
+    """A float or narrow ts_ms means the reader was bypassed. Fail loudly."""
+    ts = pl.Series("ts_ms", [0, 60_000, 120_000], dtype=dtype)
+    with pytest.raises(TypeError, match="Int64"):
+        canonical._epoch_bounds(ts)
+
+
+def test_all_null_timestamps_are_rejected_with_a_diagnostic():
+    ts = pl.Series("ts_ms", [None, None], dtype=pl.Int64)
+    with pytest.raises(TypeError, match="no non-null"):
+        canonical._epoch_bounds(ts)
+
+
+def test_validate_rejects_a_float_timestamp_column():
+    """End to end: the whole validator refuses, not just the helper."""
+    frame = _frame([0, 60_000, 120_000]).with_columns(pl.col("ts_ms").cast(pl.Float64))
+    with pytest.raises(TypeError, match="Int64"):
+        canonical.validate(frame, "1m")
+
+
+# ── the gap record shape ────────────────────────────────────────────────────────
+# Gap records are serialised into registry.sqlite as gaps_json and sliced into dataset
+# cards (`g['from'][:16]`). The keys and their types are a published contract, not an
+# implementation detail.
+def test_gap_records_carry_the_documented_shape():
+    report = canonical.validate(_frame([0, 60_000, 300_000]), "1m")
+    gap = report.gaps[0]
+    assert set(gap) == {"from", "to", "missing_bars"}
+    assert isinstance(gap["missing_bars"], int)
+    assert isinstance(gap["from"], str) and gap["from"].endswith("+00:00")
+    assert isinstance(gap["to"], str) and gap["to"].endswith("+00:00")
+
+
+def test_as_dict_sums_missing_bars_across_every_gap():
+    report = canonical.validate(_frame([0, 60_000, 300_000, 900_000]), "1m")
+    assert len(report.gaps) == 2
+    assert report.as_dict()["missing_bars"] == sum(g["missing_bars"] for g in report.gaps)
+
+
+# ── local archive addressing ────────────────────────────────────────────────────
+def test_monthly_archive_local_path_is_assembled_from_mixed_parts():
+    """RAW_ROOT is a Path and every other component is a str; the join must still work."""
+    a = sources.Archive("um", "BTCUSDT", "klines", date(2026, 6, 1), "1m")
+    assert a.local.is_absolute()
+    assert a.local.as_posix().endswith(
+        "data/raw/binance/um/BTCUSDT/klines/1m/BTCUSDT-1m-2026-06.zip"
+    )
+    assert "/2026/" not in a.local.as_posix()      # monthly kinds are not year-foldered

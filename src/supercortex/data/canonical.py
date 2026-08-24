@@ -6,9 +6,11 @@ reproducing L1 byte-for-byte, we have a data swamp rather than a data lake.
 from __future__ import annotations
 
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TypedDict
 
 import polars as pl
 
@@ -92,7 +94,37 @@ def read_klines(archive: Archive) -> pl.DataFrame:
 
 
 
-def _gap_scan(frame: pl.DataFrame, step_ms: int) -> tuple[list[dict[str, object]], int]:
+#: One missing stretch. Serialised verbatim into `gaps_json` in registry.sqlite and sliced
+#: into dataset cards, so the keys and their types are a published contract. `from` is a
+#: Python keyword, hence the functional spelling.
+Gap = TypedDict("Gap", {"from": str, "to": str, "missing_bars": int})
+
+
+def _epoch_bounds(ts: pl.Series) -> tuple[int, int]:
+    """The first and last epoch-millisecond in `ts`, as ints.
+
+    Every reader ends its timestamp expression with `.cast(pl.Int64)`, so `ts_ms` is Int64
+    by construction and `Series.min()/max()` return Python ints. Polars cannot express that
+    in its return type — a Series may hold any dtype, so the annotation is the union of all
+    of them — and the validators need real ints to subtract, floor-divide by the step, and
+    divide by 1000 for the ISO range.
+
+    Checking the invariant is what makes narrowing it honest. A Float64 or all-null `ts_ms`
+    means the reader was bypassed; without this it produced a plausible-looking
+    QualityReport from a broken frame, which is the one outcome this desk cannot tolerate.
+    """
+    if ts.dtype != pl.Int64:
+        raise TypeError(
+            f"ts_ms must be Int64 epoch milliseconds, got {ts.dtype}. Build L1 through "
+            f"the readers in this module — they cast; nothing downstream re-checks."
+        )
+    low, high = ts.min(), ts.max()
+    if not isinstance(low, int) or not isinstance(high, int):
+        raise TypeError("ts_ms has no non-null values, so its range is undefined")
+    return low, high
+
+
+def _gap_scan(frame: pl.DataFrame, step_ms: int) -> tuple[list[Gap], int]:
     """Find genuinely missing intervals, and count off-grid jitter separately.
 
     Flooring the delta conflates the two. Binance metrics observations are 1-2 seconds
@@ -104,7 +136,7 @@ def _gap_scan(frame: pl.DataFrame, step_ms: int) -> tuple[list[dict[str, object]
         pl.col("ts_ms").alias("t"), pl.col("ts_ms").diff().alias("d")
     ).drop_nulls()
 
-    gaps: list[dict[str, object]] = []
+    gaps: list[Gap] = []
     off_grid = 0
     for row in deltas.iter_rows(named=True):
         missing = round(row["d"] / step_ms) - 1
@@ -128,7 +160,7 @@ class QualityReport:
     start: str
     end: str
     expected_rows: int
-    gaps: list[dict[str, object]] = field(default_factory=list)
+    gaps: list[Gap] = field(default_factory=list)
     duplicates: int = 0
     non_monotonic: int = 0
     violations: list[str] = field(default_factory=list)
@@ -148,7 +180,7 @@ class QualityReport:
             "expected_rows": self.expected_rows,
             "completeness": round(self.completeness, 6),
             "gap_count": len(self.gaps),
-            "missing_bars": sum(int(g["missing_bars"]) for g in self.gaps),  # type: ignore[arg-type]
+            "missing_bars": sum(g["missing_bars"] for g in self.gaps),
             "duplicates": self.duplicates,
             "non_monotonic": self.non_monotonic,
             "violations": self.violations,
@@ -174,8 +206,8 @@ def validate(frame: pl.DataFrame, interval: str) -> QualityReport:
 
     gaps, off_grid = _gap_scan(frame, step)
 
-    span = int(ts.max() - ts.min())  # type: ignore[operator]
-    expected = span // step + 1
+    low, high = _epoch_bounds(ts)
+    expected = (high - low) // step + 1
 
     if duplicates:
         violations.append(f"{duplicates} duplicate timestamps")
@@ -200,8 +232,8 @@ def validate(frame: pl.DataFrame, interval: str) -> QualityReport:
 
     return QualityReport(
         rows=frame.height,
-        start=datetime.fromtimestamp(ts.min() / 1000, UTC).isoformat(),  # type: ignore[operator]
-        end=datetime.fromtimestamp(ts.max() / 1000, UTC).isoformat(),  # type: ignore[operator]
+        start=datetime.fromtimestamp(low / 1000, UTC).isoformat(),
+        end=datetime.fromtimestamp(high / 1000, UTC).isoformat(),
         expected_rows=expected,
         gaps=gaps,
         duplicates=duplicates,
@@ -285,8 +317,8 @@ def validate_funding(frame: pl.DataFrame) -> QualityReport:
 
     gaps, off_grid = _gap_scan(frame, step_ms)
 
-    span = int(ts.max() - ts.min())  # type: ignore[operator]
-    expected = span // step_ms + 1
+    low, high = _epoch_bounds(ts)
+    expected = (high - low) // step_ms + 1
 
     if duplicates:
         violations.append(f"{duplicates} duplicate funding timestamps")
@@ -297,8 +329,8 @@ def validate_funding(frame: pl.DataFrame) -> QualityReport:
 
     report = QualityReport(
         rows=frame.height,
-        start=datetime.fromtimestamp(ts.min() / 1000, UTC).isoformat(),  # type: ignore[operator]
-        end=datetime.fromtimestamp(ts.max() / 1000, UTC).isoformat(),  # type: ignore[operator]
+        start=datetime.fromtimestamp(low / 1000, UTC).isoformat(),
+        end=datetime.fromtimestamp(high / 1000, UTC).isoformat(),
         expected_rows=expected, gaps=gaps,
         duplicates=duplicates, non_monotonic=non_monotonic, violations=violations,
     )
@@ -374,7 +406,7 @@ def validate_metrics(frame: pl.DataFrame) -> QualityReport:
 
     gaps, off_grid = _gap_scan(frame, METRICS_STEP_MS)
 
-    span = int(ts.max() - ts.min())  # type: ignore[operator]
+    low, high = _epoch_bounds(ts)
     if duplicates:
         violations.append(f"{duplicates} duplicate timestamps")
     if non_monotonic:
@@ -395,9 +427,9 @@ def validate_metrics(frame: pl.DataFrame) -> QualityReport:
 
     return QualityReport(
         rows=frame.height,
-        start=datetime.fromtimestamp(ts.min() / 1000, UTC).isoformat(),  # type: ignore[operator]
-        end=datetime.fromtimestamp(ts.max() / 1000, UTC).isoformat(),  # type: ignore[operator]
-        expected_rows=span // METRICS_STEP_MS + 1, gaps=gaps,
+        start=datetime.fromtimestamp(low / 1000, UTC).isoformat(),
+        end=datetime.fromtimestamp(high / 1000, UTC).isoformat(),
+        expected_rows=(high - low) // METRICS_STEP_MS + 1, gaps=gaps,
         duplicates=duplicates, non_monotonic=non_monotonic, violations=violations,
         notes={**({"off_grid": off_grid} if off_grid else {}), **null_notes},
     )
@@ -405,8 +437,8 @@ def validate_metrics(frame: pl.DataFrame) -> QualityReport:
 
 def build_generic(
     archives: list[Archive],
-    reader,
-    validator,
+    reader: Callable[[Archive], pl.DataFrame],
+    validator: Callable[[pl.DataFrame], QualityReport],
     out: Path,
 ) -> tuple[Path, QualityReport]:
     """Concatenate L0 archives into one validated L1 Parquet file."""

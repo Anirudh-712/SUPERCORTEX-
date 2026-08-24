@@ -76,7 +76,9 @@ class Archive:
 
     @property
     def local(self) -> Path:
-        parts = [RAW_ROOT, "binance", self.market, self.symbol, self.kind]
+        # RAW_ROOT is a Path and every other component is a str, so the element type has
+        # to be stated: inferred, the list widens to list[object] and Path() rejects it.
+        parts: list[str | Path] = [RAW_ROOT, "binance", self.market, self.symbol, self.kind]
         if self.interval:
             parts.append(self.interval)
         if self.cadence == "daily":

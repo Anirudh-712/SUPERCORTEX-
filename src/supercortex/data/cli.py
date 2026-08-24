@@ -5,6 +5,7 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
+import polars as pl
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -77,7 +78,7 @@ def build(
     table.add_row("range", f"{report.start[:19]} → {report.end[:19]}")
     table.add_row("completeness", f"{report.completeness:.4%}")
     table.add_row("gaps", f"{len(report.gaps)} spanning "
-                          f"{sum(int(g['missing_bars']) for g in report.gaps):,} bars")
+                          f"{sum(g['missing_bars'] for g in report.gaps):,} bars")
     table.add_row("duplicates", str(report.duplicates))
     table.add_row("size", f"{path.stat().st_size / 1024**2:.1f} MB")
     console.print(table)
@@ -102,7 +103,9 @@ def _l1_path(symbol: str, market: str, kind: str, interval: str) -> Path:
             / filename.format(interval=interval))
 
 
-def _validate_for(kind: str, frame, interval: str):
+def _validate_for(
+    kind: str, frame: pl.DataFrame, interval: str
+) -> canonical.QualityReport:
     if kind == "klines":
         return canonical.validate(frame, interval)
     if kind == "funding":
@@ -165,10 +168,8 @@ def card(
              card_path.relative_to(db.PROJECT_ROOT).as_posix()),
         )
 
-    missing_total = sum(int(g["missing_bars"]) for g in report.gaps)  # type: ignore[arg-type]
-    top_gaps = sorted(  # type: ignore[arg-type]
-        report.gaps, key=lambda g: -int(g["missing_bars"])
-    )[:10]
+    missing_total = sum(g["missing_bars"] for g in report.gaps)
+    top_gaps = sorted(report.gaps, key=lambda g: -g["missing_bars"])[:10]
     gap_table = "\n".join(
         f"| {g['from'][:16]} | {g['to'][:16]} | {g['missing_bars']} | |" for g in top_gaps
     ) or "| — | — | 0 | none |"
@@ -353,7 +354,7 @@ def _report_table(report: canonical.QualityReport, path: Path) -> Table:
     table.add_row("range", f"{report.start[:19]} → {report.end[:19]}")
     table.add_row("completeness", f"{report.completeness:.4%}")
     table.add_row("gaps", f"{len(report.gaps)} spanning "
-                          f"{sum(int(g['missing_bars']) for g in report.gaps):,} intervals")
+                          f"{sum(g['missing_bars'] for g in report.gaps):,} intervals")
     table.add_row("duplicates", str(report.duplicates))
     for key, value in report.notes.items():
         table.add_row(key, str(value))
