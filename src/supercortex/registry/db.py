@@ -18,9 +18,17 @@ ID_WIDTH = 6
 PREFIXES = ("IDEA", "EXP", "STR", "DEC", "ADR", "LRN", "TASK", "DATA", "AGT", "DEP", "INC")
 
 
+#: Canonical timestamp format: UTC, space-separated, no offset.
+#: This is deliberately SQLite's own `datetime('now')` format rather than strict
+#: ISO-8601. With a 'T' separator and a '+00:00' offset, string comparison against
+#: `datetime('now', '-6 hours')` silently never matches, which made trial reaping
+#: dead code. `datetime.fromisoformat` still parses this, so nothing downstream loses.
+TS_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
 def now() -> str:
-    """Timestamps are UTC and ISO-8601. Local time is a reproducibility bug."""
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    """Timestamps are UTC. Local time is a reproducibility bug."""
+    return datetime.now(UTC).strftime(TS_FORMAT)
 
 
 @contextmanager

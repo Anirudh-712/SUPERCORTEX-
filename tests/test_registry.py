@@ -129,3 +129,55 @@ def test_invalid_status_rejected(registry):
             " VALUES ('EXP-000002','x','x','PROFITABLE',1,?)",
             (db.now(),),
         )
+
+
+# ── timestamps must be comparable to SQLite's own clock ─────────────────────────
+def test_timestamps_compare_against_sqlite_now(registry):
+    """Regression: ISO 'T' + '+00:00' never sorted against datetime('now'),
+    which silently made trial reaping dead code."""
+    _insert_trial(registry, 1)
+    row = registry.execute(
+        "SELECT started_at <= datetime('now')            AS not_future,"
+        "       started_at >  datetime('now','-1 hour')  AS not_ancient,"
+        "       started_at <  datetime('now','+1 hour')  AS orders_forward"
+        " FROM trial WHERE seq = 1"
+    ).fetchone()
+    # With the old 'T'/'+00:00' format every one of these was 0 or 1 regardless of the
+    # real instant, because the comparison was lexical nonsense rather than temporal.
+    assert (row["not_future"], row["not_ancient"], row["orders_forward"]) == (1, 1, 1)
+
+
+def test_reap_marks_old_open_trials_abandoned(registry, monkeypatch, tmp_path):
+    from supercortex.registry import experiments
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "registry.sqlite")
+    registry.execute(
+        "INSERT INTO trial(experiment_id,seq,config_hash,code_commit,data_snapshot,"
+        "cost_model_version,seed,started_at) VALUES ('EXP-000001',1,'c','g','d','v',1,"
+        "datetime('now','-9 hours'))"
+    )
+    _insert_trial(registry, 2)  # fresh, must survive
+    reaped = experiments.reap_stale(6.0)
+    assert reaped == [("EXP-000001", 1)]
+    outcomes = dict(
+        registry.execute("SELECT seq, outcome FROM trial ORDER BY seq").fetchall()
+    )
+    assert outcomes[1] == "abandoned"
+    assert outcomes[2] is None
+
+
+def test_reaped_trials_still_count_toward_the_total(registry, monkeypatch, tmp_path):
+    from supercortex.registry import experiments
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "registry.sqlite")
+    registry.execute(
+        "INSERT INTO trial(experiment_id,seq,config_hash,code_commit,data_snapshot,"
+        "cost_model_version,seed,started_at) VALUES ('EXP-000001',1,'c','g','d','v',1,"
+        "datetime('now','-9 hours'))"
+    )
+    experiments.reap_stale(6.0)
+    row = registry.execute(
+        "SELECT * FROM experiment_trials WHERE id = 'EXP-000001'"
+    ).fetchone()
+    assert row["trials_consumed"] == 1
+    assert row["trials_abandoned"] == 1
