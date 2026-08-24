@@ -1,0 +1,27 @@
+# data lake — lives on disk / external SSD, never in git
+data/
+logs/
+*.parquet
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# secrets — belt and braces; real secrets live in the Keychain
+.env
+.env.*
+secrets/
+*.pem
+*.key
+
+# local-only
+CLAUDE.local.md
+.claude/settings.local.json
+.DS_Store
+
+# literature PDFs (disk + copyright)
+01-research/literature/pdf/
