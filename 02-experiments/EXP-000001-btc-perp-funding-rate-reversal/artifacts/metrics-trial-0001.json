@@ -1,8 +1,0 @@
-{
-  "max_drawdown": -0.284,
-  "n_trades": 96,
-  "post_tax_return": -0.0118,
-  "sharpe_ratio": 0.31,
-  "total_return": 0.0412,
-  "trials_at_run": 3
-}

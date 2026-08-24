@@ -111,7 +111,8 @@ def execute(
     metrics = _metrics(experiment_id, seq, spec, model, conservative, results, diagnostics)
 
     # 4. SEAL.
-    experiments.close_trial(experiment_id, seq, "ok", metrics)
+    experiments.close_trial(experiment_id, seq, "ok", metrics,
+                            is_headline=(shift_bars == 0))
     return metrics
 
 
@@ -138,6 +139,14 @@ def _metrics(
             "end_ms": spec.end_ms,
             "latency_ms": spec.latency_ms,
         },
+        # Run configuration belongs in the artifact, not only in config.yaml. Omitting it
+        # meant a report could not state the starting balance without typing a number the
+        # artifact did not contain — which the anti-fabrication hook correctly rejected.
+        "run_config": {
+            "starting_balance": spec.starting_balance,
+            "leverage": spec.leverage,
+            "seed": spec.seed,
+        },
         "trades": {
             "n_trades": conservative.n_trades,
             "n_wins": conservative.n_wins,
@@ -150,6 +159,10 @@ def _metrics(
                 conservative.profit_factor_gross >= conservative.break_even_profit_factor
             ),
         },
+        # A LIST of pairs, not a dict: `json.dumps(sort_keys=True)` alphabetises dict
+        # keys, which would silently scramble a ladder whose only job is to be monotonic.
+        "four_numbers_ordered": [[label, round(value, 2)]
+                                 for label, value in conservative.four_numbers()],
         "four_numbers": {label: round(value, 2)
                          for label, value in conservative.four_numbers()},
         "detail": {
@@ -182,13 +195,16 @@ def _metrics(
 
 
 def write_metrics(experiment_id: str, metrics: dict[str, Any]) -> Path:
+    """Path of the artifact `close_trial` already wrote. Probes get their own file."""
     with db.connect() as conn:
         slug = conn.execute(
             "SELECT slug FROM experiment WHERE id = ?", (experiment_id,)
         ).fetchone()["slug"]
     artifacts = experiments.EXPERIMENTS_DIR / f"{experiment_id}-{slug}" / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
-    path = artifacts / "metrics.json"
+    shift = metrics.get("engine", {}).get("shift_bars", 0)
+    name = "metrics.json" if not shift else f"metrics-probe-shift{shift}.json"
+    path = artifacts / name
     path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
     return path
 

@@ -1,8 +1,73 @@
 {
-  "max_drawdown": -0.284,
-  "n_trades": 96,
-  "post_tax_return": -0.0118,
-  "sharpe_ratio": 0.31,
-  "total_return": 0.0412,
-  "trials_at_run": 3
+  "cost_model_version": "india-vda-1.0.0",
+  "detail": {
+    "execution_costs": 34901.72,
+    "funding_pnl": 0.0,
+    "gross_pnl": 48458.98,
+    "tax_payable": 0.0,
+    "tax_total": 73374.84,
+    "tds_carry_cost": 14395.28,
+    "tds_credited": 73374.84,
+    "tds_withheld": 205646.88
+  },
+  "engine": {
+    "bars": 51768,
+    "closed_trades": 386,
+    "engine_realized_pnl": 48458.9773,
+    "fills": 1158,
+    "funding_events": 6471,
+    "open_at_end_dropped": 0,
+    "our_gross_pnl": 48458.9773,
+    "positions_rows": 386,
+    "reconciliation_diff": 0.0,
+    "shift_bars": 0
+  },
+  "experiment_id": "EXP-000001",
+  "four_numbers": {
+    "gross": 48458.98,
+    "net of TDS drag": -74212.86,
+    "net of costs": 13557.26,
+    "net of tax": -59817.58
+  },
+  "regime": "vda_strict",
+  "regimes": {
+    "business_income": {
+      "net_after_tax": -1561.94,
+      "survives": false,
+      "tax_total": 15119.2
+    },
+    "vda_no_tds": {
+      "net_after_tax": -59817.58,
+      "survives": false,
+      "tax_total": 73374.84
+    },
+    "vda_strict": {
+      "net_after_tax": -74212.86,
+      "survives": false,
+      "tax_total": 73374.84
+    }
+  },
+  "trades": {
+    "break_even_profit_factor": 1.453488,
+    "clears_break_even": false,
+    "n_trades": 386,
+    "n_wins": 179,
+    "profit_factor_gross": 1.259532,
+    "profit_factor_net": 1.066168,
+    "turnover": 41060847.75,
+    "win_rate": 0.463731
+  },
+  "trial_seq": 2,
+  "trials_consumed_to_date": 2,
+  "verdict": {
+    "contingent_on_tax_question": false,
+    "survives_conservative_regime": false,
+    "taxed_while_losing": false
+  },
+  "window": {
+    "end_ms": 1785283140000,
+    "interval": "1h",
+    "latency_ms": 250,
+    "start_ms": 1598918400000
+  }
 }

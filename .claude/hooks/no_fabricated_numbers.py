@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -86,6 +87,53 @@ def supported(value: float, known: set[float]) -> bool:
     return False
 
 
+def trusted_artifacts(rel: str, doc: Path) -> set[Path]:
+    """Artifacts a sealed trial actually produced, plus the designated headline result.
+
+    The registry is the authority. A file on disk that no trial claims is not evidence,
+    however plausible its contents look.
+    """
+    trusted: set[Path] = set()
+    registry = PROJECT / "registry.sqlite"
+    if not registry.exists():
+        return trusted
+
+    try:
+        conn = sqlite3.connect(f"file:{registry}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return trusted
+
+    try:
+        if rel.startswith("02-experiments/"):
+            folder = rel.split("/")[1]
+            experiment_id = folder.split("-")[0] + "-" + folder.split("-")[1]
+            rows = conn.execute(
+                "SELECT metrics_path FROM trial WHERE experiment_id = ? "
+                "AND metrics_path IS NOT NULL AND outcome = 'ok'",
+                (experiment_id,),
+            ).fetchall()
+            # The designated headline is a copy of one sealed trial, so it is vouched for
+            # transitively; probe outputs are not, and must be quoted from their own file.
+            headline = doc.parent / "artifacts" / "metrics.json"
+            if headline.exists():
+                trusted.add(headline)
+        else:
+            rows = conn.execute(
+                "SELECT metrics_path FROM trial WHERE metrics_path IS NOT NULL "
+                "AND outcome = 'ok'"
+            ).fetchall()
+        for row in rows:
+            candidate = PROJECT / row["metrics_path"]
+            if candidate.exists():
+                trusted.add(candidate)
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.close()
+    return trusted
+
+
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -118,28 +166,17 @@ def main() -> None:
     if not claimed:
         sys.exit(0)
 
-    # Gather every JSON artifact in scope: this experiment's artifacts/, plus any
-    # JSON sitting beside the document.
+    # Only artifacts the REGISTRY vouches for are trusted. Trusting every JSON that
+    # happens to sit in the directory would let a stray file — or one an agent wrote
+    # itself — launder an arbitrary number into a report. Provenance, not proximity.
     known: set[float] = set()
     sources: list[str] = []
-    search_dirs = [path.parent, path.parent / "artifacts", PROJECT / "data" / "artifacts"]
-    if rel.startswith("02-experiments/"):
-        exp_root = PROJECT / "02-experiments" / rel.split("/")[1]
-        search_dirs += [exp_root, exp_root / "artifacts"]
-
-    seen: set[Path] = set()
-    for directory in search_dirs:
-        if not directory.is_dir():
+    for json_path in sorted(trusted_artifacts(rel, path)):
+        try:
+            harvest(json.loads(json_path.read_text(encoding="utf-8")), known)
+            sources.append(json_path.relative_to(PROJECT).as_posix())
+        except Exception:
             continue
-        for json_path in sorted(directory.glob("*.json")):
-            if json_path in seen:
-                continue
-            seen.add(json_path)
-            try:
-                harvest(json.loads(json_path.read_text(encoding="utf-8")), known)
-                sources.append(json_path.relative_to(PROJECT).as_posix())
-            except Exception:
-                continue
 
     unsupported = {v: t for v, t in claimed.items() if not supported(v, known)}
     if not unsupported:

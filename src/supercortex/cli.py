@@ -188,6 +188,15 @@ def exp_run(
     console.print(f"\n  metrics: {path.relative_to(db.PROJECT_ROOT)}")
 
 
+@exp_app.command("report")
+def exp_report(experiment_id: str = typer.Argument(...)) -> None:
+    """Regenerate results.md from the experiment's sealed artifacts."""
+    from supercortex.report import experiment as report
+
+    path = report.render(experiment_id)
+    console.print(f"[green]written[/] {path.relative_to(db.PROJECT_ROOT)}")
+
+
 @exp_app.command("reap")
 def exp_reap(hours: float = typer.Option(6.0, "--hours")) -> None:
     """Mark stale open trials abandoned. They still count toward the trial total."""

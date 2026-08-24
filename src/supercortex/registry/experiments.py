@@ -153,7 +153,12 @@ def open_trial(
 
 
 def close_trial(
-    experiment_id: str, seq: int, outcome: str, metrics: dict[str, Any] | None = None
+    experiment_id: str,
+    seq: int,
+    outcome: str,
+    metrics: dict[str, Any] | None = None,
+    *,
+    is_headline: bool = True,
 ) -> Path | None:
     """Seal a trial. After this the row is immutable — the triggers enforce it."""
     if outcome not in {"ok", "error", "abandoned"}:
@@ -167,12 +172,15 @@ def close_trial(
             ).fetchone()["slug"]
         artifacts = EXPERIMENTS_DIR / f"{experiment_id}-{slug}" / "artifacts"
         artifacts.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(metrics, indent=2, sort_keys=True)
         metrics_path = artifacts / f"metrics-trial-{seq:04d}.json"
-        metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
-        # metrics.json always points at the most recent completed trial
-        (artifacts / "metrics.json").write_text(
-            json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        metrics_path.write_text(payload, encoding="utf-8")
+        # metrics.json is the DESIGNATED result, not merely the most recent one. A
+        # diagnostic probe deliberately corrupts its own inputs, so letting it overwrite
+        # the headline would leave the experiment reporting a number produced by a run
+        # that was never meant to be believed.
+        if is_headline:
+            (artifacts / "metrics.json").write_text(payload, encoding="utf-8")
 
     with connect() as conn:
         conn.execute(
