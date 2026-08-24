@@ -112,7 +112,9 @@ CREATE TABLE IF NOT EXISTS dataset (
     title       TEXT NOT NULL,
     venue       TEXT,
     symbol      TEXT,
+    kind        TEXT,                 -- klines | funding | metrics
     interval    TEXT,
+    parquet_path TEXT,                -- the exact L1 file; verify never guesses
     sha256      TEXT NOT NULL,
     rows        INTEGER,
     start_ts    TEXT,

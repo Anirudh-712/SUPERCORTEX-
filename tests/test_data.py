@@ -110,3 +110,109 @@ def test_months_is_inclusive_across_a_year_boundary():
 def test_unknown_interval_is_rejected():
     with pytest.raises(KeyError):
         canonical.validate(_frame([0, 60_000]), "7m")
+
+
+# ── gap detection must not confuse clock jitter with missing data ───────────────
+def test_off_grid_jitter_is_not_a_gap():
+    """Binance metrics timestamps drift 1-2s off the 5-minute grid 42 times in six
+    years. Flooring the delta reported each as a 'gap of 0', burying the real gaps."""
+    step = 300_000
+    ts = [0, step, 2 * step + 1000, 3 * step]  # third observation is 1s late
+    gaps, off_grid = canonical._gap_scan(pl.DataFrame({"ts_ms": ts}), step)
+    assert gaps == []
+    assert off_grid == 2  # the late arrival perturbs the delta before and after it
+
+
+def test_genuine_missing_interval_is_a_gap():
+    step = 300_000
+    gaps, off_grid = canonical._gap_scan(pl.DataFrame({"ts_ms": [0, step, 3 * step]}), step)
+    assert len(gaps) == 1
+    assert gaps[0]["missing_bars"] == 1
+    assert off_grid == 0
+
+
+def test_jitter_around_a_real_gap_still_counts_the_gap():
+    step = 300_000
+    ts = [0, step, 4 * step + 2000]  # two missing, plus 2s of jitter
+    gaps, _ = canonical._gap_scan(pl.DataFrame({"ts_ms": ts}), step)
+    assert len(gaps) == 1
+    assert gaps[0]["missing_bars"] == 2
+
+
+# ── funding ─────────────────────────────────────────────────────────────────────
+def _funding(ts_ms: list[int], rate: float = 0.0001, hours: int = 8) -> pl.DataFrame:
+    n = len(ts_ms)
+    return pl.DataFrame({
+        "ts_ms": ts_ms,
+        "funding_interval_hours": [hours] * n,
+        "funding_rate": [rate] * n,
+    })
+
+
+def test_funding_eight_hourly_series_is_clean():
+    step = 8 * 3_600_000
+    report = canonical.validate_funding(_funding([0, step, 2 * step]))
+    assert report.ok
+    assert report.notes["funding_intervals_seen"] == [8]
+
+
+def test_implausible_funding_rate_is_a_violation():
+    """A rate beyond +/-5% per interval means the units are wrong, not the market."""
+    report = canonical.validate_funding(_funding([0, 8 * 3_600_000], rate=0.5))
+    assert not report.ok
+    assert any("beyond" in v for v in report.violations)
+
+
+def test_missing_funding_event_is_a_gap():
+    step = 8 * 3_600_000
+    report = canonical.validate_funding(_funding([0, step, 3 * step]))
+    assert len(report.gaps) == 1
+    assert report.gaps[0]["missing_bars"] == 1
+
+
+# ── metrics ─────────────────────────────────────────────────────────────────────
+def _metrics(ts_ms: list[int], oi: float = 100.0) -> pl.DataFrame:
+    n = len(ts_ms)
+    return pl.DataFrame({
+        "ts_ms": ts_ms, "open_interest": [oi] * n, "open_interest_value": [oi * 1e4] * n,
+        "toptrader_accounts_ls": [1.0] * n, "toptrader_positions_ls": [1.0] * n,
+        "all_accounts_ls": [1.0] * n, "taker_volume_ls": [1.0] * n,
+    })
+
+
+def test_metrics_five_minute_grid_is_clean():
+    report = canonical.validate_metrics(_metrics([0, 300_000, 600_000]))
+    assert report.ok
+    assert report.gaps == []
+
+
+def test_negative_open_interest_is_a_violation():
+    report = canonical.validate_metrics(_metrics([0, 300_000], oi=-1.0))
+    assert not report.ok
+    assert any("negative open interest" in v for v in report.violations)
+
+
+# ── archive addressing for the two cadences ─────────────────────────────────────
+def test_metrics_is_daily_not_monthly():
+    """Binance publishes no monthly metrics archive — requesting one 404s."""
+    a = sources.Archive("um", "BTCUSDT", "metrics", date(2026, 6, 15))
+    assert a.cadence == "daily"
+    assert a.url.endswith("daily/metrics/BTCUSDT/BTCUSDT-metrics-2026-06-15.zip")
+
+
+def test_funding_is_monthly():
+    a = sources.Archive("um", "BTCUSDT", "fundingRate", date(2026, 6, 1))
+    assert a.cadence == "monthly"
+    assert a.url.endswith("monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-2026-06.zip")
+
+
+def test_daily_archives_are_foldered_by_year():
+    a = sources.Archive("um", "BTCUSDT", "metrics", date(2026, 6, 15))
+    assert "/metrics/2026/" in a.local.as_posix()
+
+
+def test_days_is_inclusive():
+    got = sources.days(date(2024, 2, 27), date(2024, 3, 2))
+    assert [d.isoformat() for d in got] == [
+        "2024-02-27", "2024-02-28", "2024-02-29", "2024-03-01", "2024-03-02"
+    ]

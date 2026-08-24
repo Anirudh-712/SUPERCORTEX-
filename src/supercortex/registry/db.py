@@ -42,10 +42,22 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+#: Columns added after a table first shipped. `CREATE TABLE IF NOT EXISTS` will not add
+#: them to an existing database, so they are applied explicitly and idempotently.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("dataset", "kind", "TEXT"),
+    ("dataset", "parquet_path", "TEXT"),
+)
+
+
 def init(path: Path | None = None) -> Path:
     target = path or DB_PATH
     with connect(target) as conn:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        for table, column, decl in MIGRATIONS:
+            existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
     return target
 
 
