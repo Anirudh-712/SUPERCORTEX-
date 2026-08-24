@@ -26,7 +26,8 @@ RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bop\s+(read|item|signin)\b"),
      "CREDENTIALS: 1Password CLI is off-limits to agents."),
     (re.compile(r"(cat|less|head|tail|bat|open|cp|mv)\s+[^|;&]*\.env"),
-     "CREDENTIALS: .env files are off-limits. Config lives in config.yaml; secrets live in the Keychain."),
+     ("CREDENTIALS: .env files are off-limits. Config lives in config.yaml; "
+      "secrets live in the Keychain.")),
     (re.compile(r"curl[^|;&]*\b(api|fapi|dapi)\.(binance|bybit|okx)\.com"),
      "VENUE: authenticated venue endpoints are unreachable from an agent by design. "
      "Public history comes from data.binance.vision."),
