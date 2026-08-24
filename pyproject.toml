@@ -11,6 +11,7 @@ dependencies = [
     "polars>=1.44.0",
     "pyarrow>=25.0.1",
     "duckdb>=1.5.5",
+    "nautilus-trader>=1.231.0",
 ]
 
 [project.scripts]

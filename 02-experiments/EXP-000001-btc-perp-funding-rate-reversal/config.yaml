@@ -1,14 +1,34 @@
 # EXP-000001 — the ONLY source of parameters.
-# Never pass a parameter on the command line: it would not be hashed,
-# and the trial would not be reproducible.
+# Never pass a parameter on the command line: it would not be hashed, and the trial
+# would not be reproducible. This file's sha256 IS the trial's config identity.
 experiment_id: EXP-000001
-strategy: null
+strategy: supercortex.backtest.strategies.funding_reversal:FundingReversal
 seed: 42
 
-params: {}
+starting_balance: 100000.0
+leverage: 1.0
+latency_ms: 250          # home connection in India; not colocated
+
+params:
+  lookback_events: 90          # 90 funding events ~ 30 days at 8h
+  entry_z: 1.5                 # |z| beyond which crowding is deemed extreme
+  exit_z: 0.5                  # normalisation level that closes the position
+  max_hold_bars: 72            # hard time stop, 3 days at 1h bars
+  trade_size_pct: 0.20
+  min_events_before_trading: 90
+  allow_long: true
+  allow_short: true
 
 data:
-  datasets: []
+  symbol: BTCUSDT
+  market: um
+  interval: 1h
+  # Window narrowed to where open interest also exists — see hypothesis.md amendment.
+  start_ms: 1598918400000      # 2020-09-01T00:00:00Z
+  end_ms:   1785283140000      # 2026-07-31T23:59:00Z
+  datasets:
+    - DATA-000002              # 1m klines
+    - DATA-000003              # funding rate
 
 cost_model:
   version: india-vda-1.0.0

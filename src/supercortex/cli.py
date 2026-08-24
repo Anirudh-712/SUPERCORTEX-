@@ -133,6 +133,61 @@ def exp_open(
     console.print(f"[green]{experiment_id} trial {seq}[/] open — {n} trials consumed to date")
 
 
+@exp_app.command("run")
+def exp_run(
+    experiment_id: str = typer.Argument(...),
+    agent: str | None = typer.Option(None, "--agent"),
+    note: str | None = typer.Option(None, "--note"),
+    shift_bars: int = typer.Option(0, "--shift-bars",
+                                   help="Look-ahead probe: hand bars over N intervals early."),
+    allow_dirty: bool = typer.Option(False, "--allow-dirty"),
+) -> None:
+    """Register a trial, run the backtest, apply the cost model, seal the trial."""
+    from supercortex.backtest import trial
+
+    try:
+        metrics = trial.execute(
+            experiment_id, agent_id=agent, note=note,
+            shift_bars=shift_bars, allow_dirty=allow_dirty,
+        )
+    except (RuntimeError, KeyError) as exc:
+        console.print(f"[red]refused:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    path = trial.write_metrics(experiment_id, metrics)
+    t = metrics["trades"]
+
+    console.print(
+        f"[green]{experiment_id} trial {metrics['trial_seq']}[/] sealed — "
+        f"{metrics['trials_consumed_to_date']} trials consumed to date"
+    )
+    console.print(f"  engine reconciliation diff "
+                  f"{metrics['engine']['reconciliation_diff']}")
+
+    ladder = Table(show_header=False, title="the four numbers (VDA_STRICT)")
+    for label, value in metrics["four_numbers"].items():
+        ladder.add_row(label, f"{value:,.2f}")
+    console.print(ladder)
+
+    stats = Table(show_header=False)
+    stats.add_row("trades", f"{t['n_trades']} ({t['win_rate']:.1%} win rate)")
+    stats.add_row("profit factor", f"{t['profit_factor_gross']:.3f}")
+    stats.add_row("break-even PF", f"{t['break_even_profit_factor']:.3f}")
+    stats.add_row("clears break-even", "yes" if t["clears_break_even"] else "[red]NO[/]")
+    for regime, r in metrics["regimes"].items():
+        stats.add_row(regime, f"{r['net_after_tax']:>12,.0f}  "
+                              f"{'survives' if r['survives'] else '[red]fails[/]'}")
+    console.print(stats)
+
+    v = metrics["verdict"]
+    if v["taxed_while_losing"]:
+        console.print("[red]TAX BILL ON A LOSING RUN[/]")
+    if v["contingent_on_tax_question"]:
+        console.print("[yellow]CONTINGENT[/] — survives only under BUSINESS_INCOME. "
+                      "That is a bet on an unsettled tax question, not a result. ADR-012.")
+    console.print(f"\n  metrics: {path.relative_to(db.PROJECT_ROOT)}")
+
+
 @exp_app.command("reap")
 def exp_reap(hours: float = typer.Option(6.0, "--hours")) -> None:
     """Mark stale open trials abandoned. They still count toward the trial total."""
