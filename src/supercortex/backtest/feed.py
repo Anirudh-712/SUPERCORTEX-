@@ -148,14 +148,76 @@ def load_funding(
     return events
 
 
+class FeedDataError(RuntimeError):
+    """A dataset cannot answer the question being asked of it.
+
+    Its own type, and it always names the dataset and the field. `int(None)` raises a
+    TypeError that names neither, and a backtest window is not something anyone eyeballs:
+    a wrong span produces a complete, plausible result over the wrong period.
+    """
+
+
+def _epoch_bounds(path: Path, dataset: str, field: str = "ts_ms") -> tuple[int, int]:
+    """First and last epoch-millisecond in `field`, checked rather than assumed.
+
+    Polars returns `None` from `min()`/`max()` on an empty or all-null column and skips
+    nulls otherwise, so an unchecked read can silently compute bounds over a different set
+    of rows than the caller believes it asked about.
+    """
+    if not path.exists():
+        raise FeedDataError(
+            f"{dataset} has no L1 file at {path}. Build it before asking for a window."
+        )
+    frame = pl.read_parquet(path)
+
+    if field not in frame.columns:
+        raise FeedDataError(
+            f"{dataset} has no {field} column (found: {', '.join(frame.columns) or 'none'})"
+        )
+    series = frame[field]
+    if series.dtype != pl.Int64:
+        raise FeedDataError(
+            f"{dataset} {field} is {series.dtype}, expected Int64 epoch milliseconds"
+        )
+    if series.len() == 0:
+        raise FeedDataError(f"{dataset} is empty, so its {field} span is undefined")
+    nulls = series.null_count()
+    if nulls:
+        raise FeedDataError(
+            f"{dataset} has {nulls} null {field} value(s). Bounds computed over the rest "
+            f"would describe a different dataset than the one being loaded."
+        )
+
+    low, high = series.min(), series.max()
+    if not isinstance(low, int) or not isinstance(high, int):
+        raise FeedDataError(f"{dataset} {field} bounds are not integers")
+    if low <= 0:
+        raise FeedDataError(
+            f"{dataset} {field} starts at {low}, which is not a usable epoch "
+            f"millisecond. A zero or negative stamp widens every window that contains it."
+        )
+    return low, high
+
+
 def common_window(symbol: str, market: str) -> tuple[int, int]:
     """The span over which klines and funding both exist, in epoch ms."""
-    bars = pl.read_parquet(CATALOG / "klines" / f"{symbol}.{market}" / "1m.parquet")
-    fund = pl.read_parquet(CATALOG / "funding_rate" / f"{symbol}.{market}" / "funding.parquet")
-    return (
-        max(int(bars["ts_ms"].min()), int(fund["ts_ms"].min())),
-        min(int(bars["ts_ms"].max()), int(fund["ts_ms"].max())),
+    bars_low, bars_high = _epoch_bounds(
+        CATALOG / "klines" / f"{symbol}.{market}" / "1m.parquet",
+        f"klines {symbol}.{market}",
     )
+    fund_low, fund_high = _epoch_bounds(
+        CATALOG / "funding_rate" / f"{symbol}.{market}" / "funding.parquet",
+        f"funding {symbol}.{market}",
+    )
+
+    start, end = max(bars_low, fund_low), min(bars_high, fund_high)
+    if start > end:
+        raise FeedDataError(
+            f"klines and funding for {symbol}.{market} do not overlap: klines span "
+            f"{bars_low}..{bars_high}, funding {fund_low}..{fund_high}. An inverted window "
+            f"is not an empty backtest, it is a backtest over nothing reported as a run."
+        )
+    return start, end
 
 
 def catalog_path(symbol: str, market: str, kind: str, interval: str = "1m") -> Path:

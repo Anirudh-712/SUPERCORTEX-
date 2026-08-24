@@ -10,6 +10,7 @@ check read as the success of one.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from supercortex.registry import db, experiments
@@ -75,7 +76,13 @@ def _gate_not_built(name: str) -> GateResult:
     )
 
 
-GATES = {
+#: A gate looks at one experiment and either lets it through or says why not. It cannot
+#: return None, cannot return a bare bool, and has no way to express "skip": the only
+#: outcomes are a pass with a reason and a refusal with a reason. Promotion is subtraction,
+#: so the type makes "no answer" unrepresentable rather than merely discouraged.
+Gate = Callable[[str], GateResult]
+
+GATES: dict[tuple[str, str], Gate] = {
     ("RESEARCH", "BACKTESTING"): lambda e: GateResult(True, "no precondition"),
     ("BACKTESTING", "VALIDATING"): _gate_backtesting_to_validating,
     ("VALIDATING", "FALSIFYING"): lambda e: _gate_not_built("independent review"),
