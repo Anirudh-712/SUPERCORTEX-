@@ -1,0 +1,31 @@
+# Risk limits — CIO ONLY.
+#
+# Protected by four independent layers:
+#   1. permissions.deny on Edit/Write in .claude/settings.json
+#   2. a PreToolUse hook that denies writes to this path
+#   3. a pre-commit expectation that changes carry a DEC-* note in the same commit
+#   4. a runtime digest the trading process verifies against the value recorded at approval
+#
+# Agents may propose a diff in a decision note. Only the human operator commits one.
+version: 1
+
+portfolio:
+  max_gross_exposure_pct: 100        # of equity
+  max_leverage: 2.0
+  max_daily_loss_pct: 2.0            # soft: suspend all
+  max_drawdown_pct: 15.0
+  max_venue_exposure_pct: 40         # exchange failure is a live risk class in crypto
+  max_symbol_exposure_pct: 25
+  max_orders_per_minute: 60          # stops a runaway loop here, not at the venue
+  min_liquidation_distance_pct: 25.0
+
+kill_switch:
+  daily_loss_pct: 3.0                # hard: flatten everything
+  reconciliation_breaks: 3
+  data_staleness_seconds: 60
+
+per_strategy:
+  default:
+    max_position_pct: 10
+    max_drawdown_pct: 8
+    max_order_notional_usd: 500
