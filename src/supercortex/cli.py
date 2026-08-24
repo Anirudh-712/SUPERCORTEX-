@@ -143,17 +143,18 @@ def exp_run(
     experiment_id: str = typer.Argument(...),
     agent: str | None = typer.Option(None, "--agent"),
     note: str | None = typer.Option(None, "--note"),
-    shift_bars: int = typer.Option(0, "--shift-bars",
-                                   help="Look-ahead probe: hand bars over N intervals early."),
     allow_dirty: bool = typer.Option(False, "--allow-dirty"),
 ) -> None:
-    """Register a trial, run the backtest, apply the cost model, seal the trial."""
+    """Register a trial, run the backtest, apply the cost model, seal the trial.
+
+    Probes live in `supercortex falsify probe` — a diagnostic that deliberately corrupts
+    its inputs is not a variant of the baseline run.
+    """
     from supercortex.backtest import trial
 
     try:
         metrics = trial.execute(
-            experiment_id, agent_id=agent, note=note,
-            shift_bars=shift_bars, allow_dirty=allow_dirty,
+            experiment_id, agent_id=agent, note=note, allow_dirty=allow_dirty,
         )
     except (RuntimeError, KeyError) as exc:
         console.print(f"[red]refused:[/] {exc}")

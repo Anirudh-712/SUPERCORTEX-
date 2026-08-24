@@ -181,3 +181,33 @@ def test_reaped_trials_still_count_toward_the_total(registry, monkeypatch, tmp_p
     ).fetchone()
     assert row["trials_consumed"] == 1
     assert row["trials_abandoned"] == 1
+
+
+def test_dirty_tree_message_names_real_files(tmp_path, monkeypatch):
+    """Regression: `run()` strips the whole porcelain output, removing the leading
+    status space from the first line only, so a fixed-width line[3:] slice ate a
+    character off exactly one filename. An error naming a file that does not exist
+    sends you looking in the wrong place."""
+    import subprocess
+
+    calls = {}
+
+    def fake_run(args, **kwargs):
+        sub = args[1]
+        if sub == "rev-parse":
+            out = "abc123\n"
+        else:
+            # exactly what `git status --porcelain` emits, before stripping
+            out = " M src/supercortex/cli.py\n?? src/new_module.py\n"
+        calls[sub] = True
+        return subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError) as exc:
+        db.git_commit(strict=True)
+    message = str(exc.value)
+    # Assert the exact rendered list. A substring check is useless here: the old buggy
+    # output "rc/supercortex/cli.py" is itself a substring of the correct path, so
+    # `"rc/supercortex" not in message` passes even when the bug is present.
+    listed = message.split("inputs: ", 1)[1].split(". A trial", 1)[0]
+    assert listed == "src/supercortex/cli.py, src/new_module.py"

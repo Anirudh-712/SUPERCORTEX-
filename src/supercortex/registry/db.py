@@ -111,7 +111,15 @@ def git_commit(strict: bool = True, extra_inputs: tuple[str, ...] = ()) -> str:
         watched = [*REPRODUCIBILITY_INPUTS, *extra_inputs]
         dirty = run("status", "--porcelain", "--", *watched)
         if dirty:
-            files = ", ".join(line[3:] for line in dirty.splitlines()[:6])
+            # Porcelain lines are "XY path", but `run` strips the whole output, which
+            # removes the leading status space from the FIRST line only. A fixed-width
+            # line[3:] therefore ate a character off exactly one filename — an error
+            # message that named a file which does not exist. Split on whitespace instead.
+            files = ", ".join(
+                line.strip().split(maxsplit=1)[-1]
+                for line in dirty.splitlines()[:6]
+                if line.strip()
+            )
             raise RuntimeError(
                 f"uncommitted changes to reproducibility inputs: {files}. "
                 "A trial recorded against uncommitted code cannot be re-run, so it is "
