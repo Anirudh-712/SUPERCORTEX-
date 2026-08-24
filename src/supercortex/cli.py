@@ -11,6 +11,7 @@ from supercortex import __version__
 from supercortex.costs import cli as costs_cli
 from supercortex.data import cli as data_cli
 from supercortex.falsify import cli as falsify_cli
+from supercortex.health import hook_checks
 from supercortex.lifecycle import machine as lifecycle
 from supercortex.registry import db, experiments
 
@@ -247,6 +248,11 @@ def doctor() -> None:
         path = hooks / name
         ok = path.exists() and path.stat().st_mode & 0o111 != 0
         checks.append((f"hook {name}", ok, "executable" if ok else "MISSING or not executable"))
+
+    # Preventive validation is only a guarantee while it is REGISTERED. A hook that exists
+    # but is not wired leaves the repository looking protected while nothing fires.
+    for check in hook_checks(db.PROJECT_ROOT):
+        checks.append((check.name, check.ok, check.detail))
 
     # the guarantee that everything else rests on
     if db.DB_PATH.exists():

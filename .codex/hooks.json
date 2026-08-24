@@ -8,6 +8,11 @@
             "type": "command",
             "command": "'/Users/anirudhtumuluru/Quant-desk/.codex/hooks/guard_write.py'",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "'/Users/anirudhtumuluru/Quant-desk/.codex/hooks/no_fabricated_numbers_pre.py'",
+            "timeout": 15
           }
         ]
       },

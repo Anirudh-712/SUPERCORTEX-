@@ -8,8 +8,16 @@ Architecture rationale: `ARCHITECTURE-RESEARCH-REPORT.md`. Read it before propos
 ## The five laws
 
 1. **NEVER write a number into a document unless you read it from a file produced by code.**
-   No estimated Sharpe ratios. No "approximately". Cite the artifact path. A `PostToolUse` hook
-   enforces this and will reject your write.
+   No estimated Sharpe ratios. No "approximately". Cite the artifact path. Two hooks enforce
+   this, and the first one means an unsupported number never reaches disk at all:
+   - **`PreToolUse` prevents.** It validates the *proposed* content — for an `Edit`, the whole
+     reconstructed document, not just the fragment — and denies the write before the file
+     exists. The client refuses it regardless of what the model decides.
+   - **`PostToolUse` verifies.** It re-reads the bytes that actually landed and confirms they
+     are what was approved.
+   Only artifacts belonging to a sealed, successful registered trial count as evidence.
+   Anything watched that cannot be identified, reconstructed or checked is **denied**, with a
+   diagnostic naming what could not be resolved. See [[ADR-013]].
 2. **NEVER run a backtest that has not been registered.** `supercortex exp register` first.
    Unregistered runs corrupt the trial count and silently invalidate every significance test.
 3. **NEVER touch `06-risk/limits.yaml`, `.env*`, or the Keychain.** Ask the CIO.
