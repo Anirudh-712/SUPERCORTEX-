@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
+from typer.core import TyperGroup
 
 from supercortex import __version__
 from supercortex.costs import cli as costs_cli
@@ -16,7 +18,33 @@ from supercortex.lifecycle import machine as lifecycle
 from supercortex.registry import db, experiments
 from supercortex.report.experiment import render_profit_factor
 
-app = typer.Typer(no_args_is_help=True, add_completion=False,
+
+class SupercortexGroup(TyperGroup):
+    """Turns a stale-registry refusal into a clean exit, once, for every command.
+
+    `db.connect` raises `SchemaOutOfDate` from wherever a command first reaches the
+    registry. Click's group `invoke` encloses the whole subcommand chain, so catching it
+    here covers `exp`, `data`, `costs`, `falsify` and `lifecycle` alike — and a command
+    added later cannot forget to handle it.
+
+    An operator gets the missing items and the recovery command, never a traceback out of
+    SQLite naming one column at a time.
+    """
+
+    # `ctx: Any` because Typer 0.27 vendors click: the supertype annotates this as
+    # `typer._click.core.Context`, a private class, and `typer.Context` is a different
+    # type again. The context is forwarded unchanged and never inspected here, so naming
+    # a public type that is not the supertype's would be a false statement rather than a
+    # tighter one.
+    def invoke(self, ctx: Any) -> Any:
+        try:
+            return super().invoke(ctx)
+        except db.SchemaOutOfDate as exc:
+            console.print(f"[red]registry schema is out of date[/] — {exc}")
+            raise typer.Exit(1) from exc
+
+
+app = typer.Typer(no_args_is_help=True, add_completion=False, cls=SupercortexGroup,
                   help="Project Supercortex — autonomous quant research desk.")
 exp_app = typer.Typer(no_args_is_help=True, help="Experiments and trials.")
 app.add_typer(exp_app, name="exp")
@@ -243,6 +271,14 @@ def doctor() -> None:
     free = db.free_gb()
     checks.append(("disk above floor", free >= DISK_FLOOR_GB, f"{free:.1f} GB free"))
     checks.append(("registry exists", db.DB_PATH.exists(), db.DB_PATH.name))
+
+    # Doctor runs on a stale registry on purpose: it is the command that diagnoses one.
+    # `schema_status` reads without opening the registry through `connect`, so this row
+    # reports the problem instead of being stopped by it.
+    schema = db.schema_status()
+    checks.append(("schema current", schema.current,
+                   db.DB_PATH.name + " matches schema.sql" if schema.current
+                   else schema.summary()))
 
     hooks = db.PROJECT_ROOT / ".claude/hooks"
     for name in ("guard_write.py", "guard_bash.py", "no_fabricated_numbers.py"):

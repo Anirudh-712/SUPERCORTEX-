@@ -11,6 +11,7 @@ verdict has four. One enum for both would let a `TestResult` claim INERT.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -110,21 +111,34 @@ def test_a_fresh_schema_has_the_status_column(registry):
 
 
 def test_an_existing_database_gains_the_column_without_backfill(tmp_path):
+    """A faithful pre-status registry: `schema.sql` with the `status` column removed.
+
+    This used to rename `falsification` aside and hand-write a replacement, which omitted
+    the `REFERENCES experiment(id)` foreign key and left the renamed original behind.
+    Neither is a database this code ever produced, and the schema check now refuses both —
+    correctly, since a verdict that can orphan itself is not evidence of anything.
+    """
     legacy = tmp_path / "legacy.sqlite"
-    db.init(legacy)
-    with db.connect(legacy) as conn:
-        conn.execute("ALTER TABLE falsification RENAME TO falsification_old")
-        conn.execute(
-            "CREATE TABLE falsification (experiment_id TEXT NOT NULL, test_name TEXT"
-            " NOT NULL, statistic REAL, threshold REAL, passed INTEGER NOT NULL,"
-            " ran_at TEXT NOT NULL, artifact_path TEXT, trials_at_run INTEGER NOT NULL,"
-            " PRIMARY KEY (experiment_id, test_name))")
-        # one historical PASS and one historical non-pass, plus the ambiguous case
-        conn.execute("INSERT INTO falsification VALUES ('E','t-pass',1.0,0.5,1,'t',NULL,3)")
-        conn.execute("INSERT INTO falsification VALUES ('E','t-fail',0.1,0.5,0,'t',NULL,3)")
-        conn.execute("INSERT INTO falsification VALUES ('E','t-null',NULL,0.5,0,'t',NULL,3)")
+    current = db.SCHEMA_PATH.read_text(encoding="utf-8")
+    older = re.sub(r"\n\s*status\s+TEXT,(?=\n\s*PRIMARY KEY \(experiment_id)", "",
+                   current)
+    assert older != current, "the status column is no longer where this test expects it"
+
+    conn = sqlite3.connect(legacy)
+    conn.executescript(older)
+    conn.execute("INSERT INTO experiment(id,title,slug,status,trial_budget,created_at)"
+                 " VALUES ('E','probe','probe','RESEARCH',1,'t')")
+    # one historical PASS and one historical non-pass, plus the ambiguous case
+    conn.execute("INSERT INTO falsification VALUES ('E','t-pass',1.0,0.5,1,'t',NULL,3)")
+    conn.execute("INSERT INTO falsification VALUES ('E','t-fail',0.1,0.5,0,'t',NULL,3)")
+    conn.execute("INSERT INTO falsification VALUES ('E','t-null',NULL,0.5,0,'t',NULL,3)")
+    conn.commit()
+    conn.close()
+
+    assert not db.schema_status(legacy).current
 
     db.init(legacy)
+    assert db.schema_status(legacy).current
 
     with db.connect(legacy) as conn:
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(falsification)")}

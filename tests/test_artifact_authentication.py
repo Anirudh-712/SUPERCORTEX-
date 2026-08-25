@@ -11,6 +11,7 @@ makes the rest of the row immutable.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 
 import pytest
@@ -57,21 +58,31 @@ def test_the_hash_covers_the_exact_bytes_written(sealed):
     assert row()["artifact_sha256"] == db.sha256_file(path)
 
 
-def test_an_older_database_is_migrated_by_code(tmp_path, monkeypatch):
+def test_an_older_database_is_migrated_by_code(tmp_path):
+    """A faithful older registry: `schema.sql` as it stood before `artifact_sha256`.
+
+    This used to rename `trial` aside and hand-write a replacement with no NOT NULLs, no
+    UNIQUE and no triggers, leaving `trial_old` behind. That is not a database this code
+    ever produced, so migrating it proved nothing about migrating a real one — and the
+    schema check now refuses it outright, correctly.
+    """
     legacy = tmp_path / "legacy.sqlite"
-    db.init(legacy)
-    with db.connect(legacy) as conn:
-        conn.execute("ALTER TABLE trial RENAME TO trial_old")
-        conn.execute(
-            "CREATE TABLE trial (id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " experiment_id TEXT, seq INTEGER, config_hash TEXT, code_commit TEXT,"
-            " data_snapshot TEXT, cost_model_version TEXT, seed INTEGER,"
-            " started_at TEXT, finished_at TEXT, outcome TEXT, metrics_path TEXT,"
-            " agent_id TEXT, note TEXT)")
+    current = db.SCHEMA_PATH.read_text(encoding="utf-8")
+    older = re.sub(r"\n\s*artifact_sha256\s+TEXT,", "", current)
+    assert older != current, "the column is no longer where this test expects it"
+
+    conn = sqlite3.connect(legacy)
+    conn.executescript(older)
+    conn.commit()
+    conn.close()
+
+    assert not db.schema_status(legacy).current
     db.init(legacy)                      # must add the column, not fail
+    assert db.schema_status(legacy).current
+
     with db.connect(legacy) as conn:
-        columns = {r["name"] for r in conn.execute("PRAGMA table_info(trial)")}
-    assert "artifact_sha256" in columns
+        columns = [r["name"] for r in conn.execute("PRAGMA table_info(trial)")]
+    assert columns[-1] == "artifact_sha256"
 
 
 def test_the_artifact_hash_cannot_be_changed_after_sealing(sealed):

@@ -49,12 +49,17 @@ CREATE TABLE IF NOT EXISTS trial (
     finished_at        TEXT,
     outcome            TEXT,            -- ok | error | abandoned  (all three count)
     metrics_path       TEXT,
+    agent_id           TEXT,
+    note               TEXT,
     -- sha256 of the exact bytes written to metrics_path. Without it the artifact is a
     -- mutable document that merely claims to be the sealed result: every internal
     -- cross-check can be edited into agreement by whoever holds the file.
+    --
+    -- LAST, and in `db.MIGRATIONS` order. SQLite's ALTER TABLE can only append, so a
+    -- database that reached this column by migration has it here. Declaring it mid-table
+    -- left fresh and migrated registries carrying the same columns in different
+    -- positions -- the defect `falsification.status` was already fixed for.
     artifact_sha256    TEXT,
-    agent_id           TEXT,
-    note               TEXT,
     UNIQUE (experiment_id, seq),
     CHECK (outcome IS NULL OR outcome IN ('ok','error','abandoned'))
 );
@@ -124,9 +129,7 @@ CREATE TABLE IF NOT EXISTS dataset (
     title       TEXT NOT NULL,
     venue       TEXT,
     symbol      TEXT,
-    kind        TEXT,                 -- klines | funding | metrics
     interval    TEXT,
-    parquet_path TEXT,                -- the exact L1 file; verify never guesses
     sha256      TEXT NOT NULL,
     rows        INTEGER,
     start_ts    TEXT,
@@ -134,7 +137,10 @@ CREATE TABLE IF NOT EXISTS dataset (
     schema_path TEXT,
     gaps_json   TEXT,
     verified_at TEXT,
-    card_path   TEXT
+    card_path   TEXT,
+    -- LAST, in `db.MIGRATIONS` order, for the reason given on `trial.artifact_sha256`.
+    kind         TEXT,                -- klines | funding | metrics
+    parquet_path TEXT                 -- the exact L1 file; verify never guesses
 );
 
 CREATE TABLE IF NOT EXISTS decision (
