@@ -386,7 +386,14 @@ def read_mark_price(archive: Archive) -> pl.DataFrame:
     # six-column frame raises a ShapeError from inside the reader, which names neither the
     # archive nor the expectation - and an archive whose shape changed is precisely the
     # thing this reader must report clearly rather than coerce.
-    frame = pl.read_csv(raw, has_header=has_header, truncate_ragged_lines=False)
+    # Every column as text, nothing inferred. The venue mixes integer and float spellings
+    # of one value within a single archive - in 2026-03 `quote_volume` is `0` for 13,050
+    # rows and then `0.00000000`, well past any sampling window - so inference locked that
+    # column to i64 and then refused a value it had already ruled out. It is a column this
+    # module discards and the venue documents as Ignore: its spelling must not be able to
+    # reject an archive, and it must not get a vote on anyone else's dtype either.
+    frame = pl.read_csv(raw, has_header=has_header, truncate_ragged_lines=False,
+                        infer_schema_length=0)
     if frame.width != len(MARK_PRICE_RAW_COLUMNS):
         raise ValueError(
             f"{archive.stem}: expected {len(MARK_PRICE_RAW_COLUMNS)} columns, "
@@ -396,10 +403,11 @@ def read_mark_price(archive: Archive) -> pl.DataFrame:
 
     return (
         frame.select(
-            _to_millis(pl.col("open_time")).alias("ts_ms"),
-            # Cast rather than override on read: a month whose prices are all integral
-            # (`43158`) infers as Int64, and a column that is Float64 in one month and
-            # Int64 in the next cannot be concatenated with the rest.
+            # Cast explicitly, from text. Positions are the contract - the headed archives
+            # use the venue's own kline names (`count`, `taker_buy_volume`), which are not
+            # the names this module gives those positions, so nothing may be selected by
+            # the name the file happens to carry.
+            _to_millis(pl.col("open_time").cast(pl.Int64)).alias("ts_ms"),
             pl.col("open").cast(pl.Float64), pl.col("high").cast(pl.Float64),
             pl.col("low").cast(pl.Float64), pl.col("close").cast(pl.Float64),
         )

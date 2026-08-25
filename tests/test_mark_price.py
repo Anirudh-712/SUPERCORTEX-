@@ -769,3 +769,62 @@ def test_fetch_succeeds_quietly_when_everything_arrives(tmp_path, monkeypatch):
     monkeypatch.setattr(sources, "fetch", lambda a, **kw: a.local)
     result = invoke("fetch-mark-price", "BTCUSDT", "--start", "2022-03", "--end", "2022-03")
     assert result.exit_code == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 13. the shapes the real archives actually take
+# ══════════════════════════════════════════════════════════════════════════════
+# Measured across the 79 published BTCUSDT 1m archives: 52 carry a header and 27 do not,
+# and the headed ones use the VENUE's kline names — `count`, `taker_buy_volume`, not the
+# names this module gives the positions. Several columns mix integer and float spellings
+# of the same value: in 2026-03, `quote_volume` is `0` for 13,050 rows and then
+# `0.00000000`, which is far past polars' default inference window. That made the reader
+# lock the column to i64 and then fail on a value it had already decided was impossible —
+# in a column this module discards and the venue documents as Ignore.
+VENUE_HEADER = ("open_time,open,high,low,close,volume,close_time,quote_volume,"
+                "count,taker_buy_volume,taker_buy_quote_volume,ignore")
+
+
+def venue_row(ts: int, close: str, ignored: str) -> str:
+    """A line in the venue's own spelling, with the ignored positions spelled `ignored`."""
+    return (f"{ts},100.00000000,101.00000000,99.00000000,{close},0,"
+            f"{ts + MINUTE - 1},{ignored},60,0,{ignored},0")
+
+
+def test_a_headed_archive_uses_the_venue_column_names(archive):
+    """52 of 79 real archives look like this."""
+    rows = [VENUE_HEADER,
+            *[venue_row(BASE + i * MINUTE, "100.50000000", "0") for i in range(3)]]
+    frame = canonical.read_mark_price(archive(rows))
+    assert frame.columns == ["ts_ms", "open", "high", "low", "close", "ts"]
+    assert frame.height == 3
+
+
+def test_an_ignored_column_that_changes_spelling_late_cannot_break_the_read(archive):
+    """The 2026-03 case. The reader discards this column, so its spelling must not be able
+    to refuse an archive — and it must not be sampled to decide a dtype either."""
+    rows = [VENUE_HEADER,
+            *[venue_row(BASE + i * MINUTE, "100.50000000", "0") for i in range(200)],
+            venue_row(BASE + 200 * MINUTE, "100.50000000", "0.00000000")]
+    frame = canonical.read_mark_price(archive(rows))
+    assert frame.height == 201
+    assert frame.schema["close"] == pl.Float64
+
+
+def test_a_price_column_that_mixes_integer_and_float_spellings_is_read_as_float(archive):
+    """`close` is `66956` on one row and `66956.30000000` on the next, thousands of rows
+    apart. Both are the same kind of quantity."""
+    rows = [VENUE_HEADER,
+            *[venue_row(BASE + i * MINUTE, "66956", "0") for i in range(200)],
+            venue_row(BASE + 200 * MINUTE, "66956.30000000", "0")]
+    frame = canonical.read_mark_price(archive(rows))
+    assert frame.schema["close"] == pl.Float64
+    assert frame["close"].to_list()[:1] == [66956.0]
+    assert frame["close"].to_list()[-1] == 66956.3
+
+
+def test_a_headerless_archive_still_reads(archive):
+    """The other 27."""
+    frame = canonical.read_mark_price(archive(clean_rows(4)))
+    assert frame.height == 4
+    assert frame.columns == ["ts_ms", "open", "high", "low", "close", "ts"]
