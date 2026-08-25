@@ -19,6 +19,39 @@ from pathlib import Path
 FLOOR_GB = 2.0
 PROJECT = Path(__file__).resolve().parents[2]
 
+#: Registrable domains of trading-capable venues and brokers. Anything at or below one of
+#: these — `binance.com`, `fapi.binance.com`, `api.kite.zerodha.com` — is off-limits.
+#:
+#: `data.binance.vision` is deliberately absent and must stay absent: it is the desk's
+#: checksum-verified archive source, it shares only a label with `binance.com`, and the
+#: matcher below keys on the full registrable domain so the two never collide.
+#:
+#: The Indian broker domains are here for FEMA reasons as much as security ones. See the
+#: jurisdiction section of CLAUDE.md.
+VENUE_DOMAINS = (
+    "binance.com", "binance.us", "bybit.com", "okx.com", "deribit.com", "kraken.com",
+    "coinbase.com", "bitmex.com", "kucoin.com", "gate.io", "mexc.com", "htx.com",
+    "bitget.com",
+    "zerodha.com", "dhan.co", "angelone.in", "upstox.com", "fyers.in",
+)
+
+# Host-based, not client-based. The rule this replaces was anchored on the literal token
+# `curl`, so `python urllib.request.urlopen(...)` walked past it and pulled eight pages of
+# funding history on 2026-08-25. A guard that inspects *how* a request is spelled rather
+# than *where* it goes is documentation, not a control: there are unbounded ways to spell
+# an HTTP call and a bounded number of venues. So this matches the host wherever it
+# appears in the command, whatever surrounds it.
+#
+# The consequence is deliberate and worth stating: a command that merely *mentions* one of
+# these hosts — an echo, a grep, a heredoc — is denied too. That is the fail-closed side of
+# the trade, and it is the right side. See tests/test_venue_guard.py.
+_VENUE = re.compile(
+    r"(?:^|[^\w.-])(?:[\w-]+\.)*(?:"
+    + "|".join(d.replace(".", r"\.") for d in VENUE_DOMAINS)
+    + r")(?![\w-])",
+    re.I,
+)
+
 RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bsecurity\s+find-(generic|internet)-password\b"),
      "CREDENTIALS: the macOS Keychain is off-limits to agents. Live keys (T3) are read only "
@@ -28,9 +61,11 @@ RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(cat|less|head|tail|bat|open|cp|mv)\s+[^|;&]*\.env"),
      ("CREDENTIALS: .env files are off-limits. Config lives in config.yaml; "
       "secrets live in the Keychain.")),
-    (re.compile(r"curl[^|;&]*\b(api|fapi|dapi)\.(binance|bybit|okx)\.com"),
-     "VENUE: authenticated venue endpoints are unreachable from an agent by design. "
-     "Public history comes from data.binance.vision."),
+    (_VENUE,
+     "VENUE: trading-capable venue and broker hosts are unreachable from an agent by "
+     "design, whichever HTTP client is used. Public history comes from "
+     "data.binance.vision, which stays open. A venue API capture that the desk genuinely "
+     "needs is performed by the human operator and handed over as raw bytes."),
     # ADR-011: the broker gateway holds T3 credentials and listens on loopback. A network
     # allowlist that only considers external hosts would leave this wide open.
     (re.compile(r"(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\]):(5000|8765)\b"),
