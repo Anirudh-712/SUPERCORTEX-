@@ -86,15 +86,9 @@ def _record(experiment_id: str, verdicts: list[probes.ChannelVerdict]) -> None:
     """One row per channel. Each carries its own `v.passed`; the aggregate is the caller's
     to report and is not stored again here."""
     trials = experiments.trial_count(experiment_id)
-    with db.connect() as conn:
-        for v in verdicts:
-            conn.execute(
-                "INSERT INTO falsification(experiment_id, test_name, statistic, threshold,"
-                " passed, ran_at, artifact_path, trials_at_run)"
-                " VALUES (?,?,?,?,?,?,?,?)"
-                " ON CONFLICT(experiment_id, test_name) DO UPDATE SET"
-                " statistic=excluded.statistic, passed=excluded.passed,"
-                " ran_at=excluded.ran_at, trials_at_run=excluded.trials_at_run",
-                (experiment_id, f"1-lookahead-{v.channel}", v.advance_delta,
-                 probes.MATERIAL, int(v.passed), db.now(), None, trials),
-            )
+    for v in verdicts:
+        experiments.record_falsification(
+            experiment_id, f"1-lookahead-{v.channel}",
+            status=v.status, statistic=v.advance_delta, threshold=probes.MATERIAL,
+            trials_at_run=trials,
+        )

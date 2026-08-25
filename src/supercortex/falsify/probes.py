@@ -32,6 +32,7 @@ Read together they disambiguate the case a single probe cannot:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from supercortex.backtest.runner import ProbeSpec
@@ -90,6 +91,21 @@ def _relative(baseline: float, probed: float) -> float:
     return (probed - baseline) / abs(baseline)
 
 
+class ChannelStatus(StrEnum):
+    """What three probe runs can say about one input channel.
+
+    Four members because the three runs genuinely disambiguate four situations, and
+    collapsing them loses the distinction the battery was built to make: INERT means the
+    probe was uninformative, UNDEFINED means no comparison exists, SUSPICIOUS means the
+    channel is used but extra look-ahead bought nothing. None of those is a FAIL.
+    """
+
+    PASS = "PASS"
+    SUSPICIOUS = "SUSPICIOUS"
+    INERT = "INERT"
+    UNDEFINED = "UNDEFINED"
+
+
 @dataclass(frozen=True)
 class ChannelVerdict:
     channel: str
@@ -97,12 +113,12 @@ class ChannelVerdict:
     scramble_delta: float | None
     advance_delta: float | None
     delay_delta: float | None
-    status: str
+    status: ChannelStatus
     reasoning: str
 
     @property
     def passed(self) -> bool:
-        return self.status == "PASS"
+        return self.status is ChannelStatus.PASS
 
 
 def assess(baseline: dict[str, Any], probes: dict[str, dict[str, Any]],
@@ -121,7 +137,7 @@ def assess(baseline: dict[str, Any], probes: dict[str, dict[str, Any]],
             if value is None
         ]
         return ChannelVerdict(
-            channel, None, None, None, "UNDEFINED",
+            channel, None, None, None, ChannelStatus.UNDEFINED,
             f"profit factor is undefined for {', '.join(absent)}, so the relative change "
             f"a probe is judged on does not exist. Cannot compare, therefore not a pass — "
             f"an all-winning or zero-trade run is a real result, but it is not a "
@@ -136,7 +152,7 @@ def assess(baseline: dict[str, Any], probes: dict[str, dict[str, Any]],
     advance_helps = advance >= MATERIAL
 
     if not channel_matters and abs(advance) < MATERIAL:
-        status = "INERT"
+        status = ChannelStatus.INERT
         reasoning = (
             f"scrambling {channel} moved profit factor by {scramble:+.1%} and delaying it "
             f"by {delay:+.1%} — both immaterial. The strategy does not respond to this "
@@ -144,7 +160,7 @@ def assess(baseline: dict[str, Any], probes: dict[str, dict[str, Any]],
             f"exactly the trap LRN-000002 describes: a clean result that says nothing."
         )
     elif channel_matters and not advance_helps:
-        status = "SUSPICIOUS"
+        status = ChannelStatus.SUSPICIOUS
         reasoning = (
             f"the strategy responds to {channel} (scramble {scramble:+.1%}, delay "
             f"{delay:+.1%}) yet granting an extra interval of look-ahead changed profit "
@@ -153,7 +169,7 @@ def assess(baseline: dict[str, Any], probes: dict[str, dict[str, Any]],
             f"Inspect the timestamps on this channel."
         )
     else:
-        status = "PASS"
+        status = ChannelStatus.PASS
         reasoning = (
             f"the strategy responds to {channel} (scramble {scramble:+.1%}, delay "
             f"{delay:+.1%}) and granting look-ahead improves it by {advance:+.1%}. The "

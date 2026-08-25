@@ -92,10 +92,18 @@ CREATE TABLE IF NOT EXISTS falsification (
     test_name     TEXT NOT NULL,
     statistic     REAL,
     threshold     REAL,
-    passed        INTEGER NOT NULL,
+    passed        INTEGER NOT NULL,   -- derived from status; kept for compatibility
     ran_at        TEXT NOT NULL,
     artifact_path TEXT,
     trials_at_run INTEGER NOT NULL,   -- the N that fed the DSR at verdict time
+    -- The verdict as it was reached. NULL means the row predates this column and is
+    -- LEGACY UNCLASSIFIED: a historical non-pass cannot be classified honestly, and
+    -- `statistic IS NULL` is ambiguous, so nothing is inferred from either.
+    --
+    -- LAST on purpose. SQLite's ALTER TABLE can only append, so a migrated database has
+    -- this column here; putting it mid-table would leave fresh and migrated schemas with
+    -- the same columns in different positions.
+    status        TEXT,
     PRIMARY KEY (experiment_id, test_name)
 );
 

@@ -19,6 +19,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TypedDict, TypeGuard
 
@@ -209,6 +210,18 @@ def load_thresholds(path: Path | None = None) -> Thresholds:
     return raw
 
 
+class BatteryStatus(StrEnum):
+    """What a battery test can conclude, and nothing else.
+
+    Two members on purpose. "A test that cannot run is a FAIL, never a skip" is the rule
+    the whole battery rests on, and with no third member there is nothing to reach for
+    when a test is inconvenient.
+    """
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+
+
 @dataclass(frozen=True)
 class TestResult:
     name: str
@@ -219,8 +232,8 @@ class TestResult:
     trials_spent: int = 0
 
     @property
-    def status(self) -> str:
-        return "PASS" if self.passed else "FAIL"
+    def status(self) -> BatteryStatus:
+        return BatteryStatus.PASS if self.passed else BatteryStatus.FAIL
 
 
 @dataclass

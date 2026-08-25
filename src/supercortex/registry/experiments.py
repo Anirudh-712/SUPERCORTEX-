@@ -163,6 +163,59 @@ def open_trial(
     return int(seq)
 
 
+#: The verdict strings this table stores. The registry owns storage, not meaning, so it
+#: declares its own accepted set rather than importing the falsify package - that import
+#: would run registry -> falsify -> registry and close a cycle. A drift test asserts this
+#: set equals the union of `BatteryStatus` and `ChannelStatus`.
+FALSIFICATION_STATUSES = ("PASS", "FAIL", "SUSPICIOUS", "INERT", "UNDEFINED")
+
+#: What a NULL status means, named so no reader has to decide for itself. A row written
+#: before the column existed cannot be classified: `passed = 0` does not say which kind of
+#: non-pass it was, and `statistic IS NULL` is ambiguous because a real test can
+#: legitimately have no statistic. Such a row is evidence of nothing and must never
+#: satisfy a lifecycle gate.
+LEGACY_UNCLASSIFIED = None
+
+
+def record_falsification(
+    experiment_id: str,
+    test_name: str,
+    *,
+    status: str,
+    statistic: float | None,
+    threshold: float | None,
+    trials_at_run: int,
+    artifact_path: str | None = None,
+    ran_at: str | None = None,
+) -> None:
+    """Record one falsification verdict. The only sanctioned writer of this table.
+
+    `passed` is DERIVED from the status rather than accepted beside it: a caller that can
+    supply both can supply a pair that disagree, and the row would then say two things at
+    once. Every mutable field is replaced on a rerun - leaving a stale threshold or
+    artifact path beside a fresh verdict would attribute the new result to the old bar.
+    """
+    if status is None or status not in FALSIFICATION_STATUSES:
+        raise ValueError(
+            f"status {status!r} is not one of {list(FALSIFICATION_STATUSES)}; a verdict "
+            f"is recorded as what it was, never as a bare pass/fail"
+        )
+    passed = int(status == "PASS")
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO falsification(experiment_id, test_name, statistic, threshold,"
+            " status, passed, ran_at, artifact_path, trials_at_run)"
+            " VALUES (?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(experiment_id, test_name) DO UPDATE SET"
+            " statistic=excluded.statistic, threshold=excluded.threshold,"
+            " status=excluded.status, passed=excluded.passed, ran_at=excluded.ran_at,"
+            " artifact_path=excluded.artifact_path,"
+            " trials_at_run=excluded.trials_at_run",
+            (experiment_id, test_name, statistic, threshold, str(status), passed,
+             ran_at or now(), artifact_path, trials_at_run),
+        )
+
+
 def close_trial(
     experiment_id: str,
     seq: int,
