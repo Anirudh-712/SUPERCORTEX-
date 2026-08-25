@@ -241,8 +241,12 @@ def per_trade_returns(
 
 
 def sharpe_per_trade(returns: list[float]) -> float:
-    """The per-trade Sharpe, written into the summary so `sharpe_variance_from_registry`
-    finds the field it has always looked for and never found."""
+    """The per-trade Sharpe, written into the summary as well as the evidence block.
+
+    Both copies are replayed by the loader. Nothing reads it from a sibling artifact: an
+    unauthenticated cross-trial variance is exactly the input the falsification battery
+    must not have.
+    """
     import numpy as np
 
     from supercortex.falsify import statistics as st

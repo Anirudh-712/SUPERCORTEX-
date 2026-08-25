@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -177,6 +178,101 @@ FALSIFICATION_STATUSES = ("PASS", "FAIL", "SUSPICIOUS", "INERT", "UNDEFINED")
 LEGACY_UNCLASSIFIED = None
 
 
+@dataclass(frozen=True)
+class FalsificationResult:
+    """One test's verdict, as the storage layer receives it.
+
+    `passed` is deliberately not a field. It is derived from `status` at write time, so
+    there is no way to hand this table a pair that disagree with each other.
+    """
+
+    test_name: str
+    status: str
+    statistic: float | None
+    threshold: float | None
+
+
+def _validated(results: Sequence[FalsificationResult]) -> list[FalsificationResult]:
+    """Every reason this battery must not be written, found before anything is.
+
+    Checked as a whole rather than row by row: validating inside the write loop would
+    leave the rows before the bad one on disk, which is the partial battery this function
+    exists to prevent. A lifecycle gate reading a partial battery sees passes and no
+    failures — the most dangerous shape a half-written verdict can take.
+    """
+    rows = list(results)
+    if not rows:
+        raise ValueError(
+            "no results to record; a battery that concluded nothing is not a verdict, "
+            "and writing zero rows would let a caller report a run that recorded nothing"
+        )
+    for row in rows:
+        if not isinstance(row.test_name, str) or not row.test_name:
+            raise ValueError(f"test_name {row.test_name!r} is not a non-empty string")
+        if row.status is None or row.status not in FALSIFICATION_STATUSES:
+            raise ValueError(
+                f"status {row.status!r} for {row.test_name!r} is not one of "
+                f"{list(FALSIFICATION_STATUSES)}; a verdict is recorded as what it was, "
+                f"never as a bare pass/fail"
+            )
+    names = [row.test_name for row in rows]
+    duplicated = sorted({name for name in names if names.count(name) > 1})
+    if duplicated:
+        raise ValueError(
+            f"the battery reached a verdict for {duplicated} more than once. The upsert "
+            f"would silently keep the last one, and the stored row would then report a "
+            f"result nobody could trace back to a run."
+        )
+    return rows
+
+
+def record_falsification_batch(
+    experiment_id: str,
+    results: Sequence[FalsificationResult],
+    *,
+    trials_at_run: int,
+    artifact_path: str | None = None,
+    ran_at: str | None = None,
+) -> int:
+    """Record a complete battery, or record none of it. Returns the number of rows.
+
+    Atomic across the whole verdict on purpose. Nine rows written at nine moments against
+    nine trial counts are not one verdict: the DSR deflates against N, so two rows carrying
+    two different N describe two different judgements of the same run. One `trials_at_run`
+    and one `ran_at` are computed here, once, and every row gets them.
+
+    Every mutable field is replaced on a rerun. Leaving a stale threshold or artifact path
+    beside a fresh verdict would attribute the new result to the old bar.
+    """
+    rows = _validated(results)
+    stamp = ran_at or now()
+    payload = [
+        (experiment_id, row.test_name, row.statistic, row.threshold, str(row.status),
+         int(row.status == "PASS"), stamp, artifact_path, trials_at_run)
+        for row in rows
+    ]
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for values in payload:
+                conn.execute(
+                    "INSERT INTO falsification(experiment_id, test_name, statistic,"
+                    " threshold, status, passed, ran_at, artifact_path, trials_at_run)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)"
+                    " ON CONFLICT(experiment_id, test_name) DO UPDATE SET"
+                    " statistic=excluded.statistic, threshold=excluded.threshold,"
+                    " status=excluded.status, passed=excluded.passed,"
+                    " ran_at=excluded.ran_at, artifact_path=excluded.artifact_path,"
+                    " trials_at_run=excluded.trials_at_run",
+                    values,
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return len(rows)
+
+
 def record_falsification(
     experiment_id: str,
     test_name: str,
@@ -188,32 +284,17 @@ def record_falsification(
     artifact_path: str | None = None,
     ran_at: str | None = None,
 ) -> None:
-    """Record one falsification verdict. The only sanctioned writer of this table.
+    """Record one falsification verdict — a battery of exactly one.
 
-    `passed` is DERIVED from the status rather than accepted beside it: a caller that can
-    supply both can supply a pair that disagree, and the row would then say two things at
-    once. Every mutable field is replaced on a rerun - leaving a stale threshold or
-    artifact path beside a fresh verdict would attribute the new result to the old bar.
+    Delegates to `record_falsification_batch` rather than carrying its own INSERT, so
+    there is a single storage contract. Two writers would drift, and only one of them
+    would enforce the validation.
     """
-    if status is None or status not in FALSIFICATION_STATUSES:
-        raise ValueError(
-            f"status {status!r} is not one of {list(FALSIFICATION_STATUSES)}; a verdict "
-            f"is recorded as what it was, never as a bare pass/fail"
-        )
-    passed = int(status == "PASS")
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO falsification(experiment_id, test_name, statistic, threshold,"
-            " status, passed, ran_at, artifact_path, trials_at_run)"
-            " VALUES (?,?,?,?,?,?,?,?,?)"
-            " ON CONFLICT(experiment_id, test_name) DO UPDATE SET"
-            " statistic=excluded.statistic, threshold=excluded.threshold,"
-            " status=excluded.status, passed=excluded.passed, ran_at=excluded.ran_at,"
-            " artifact_path=excluded.artifact_path,"
-            " trials_at_run=excluded.trials_at_run",
-            (experiment_id, test_name, statistic, threshold, str(status), passed,
-             ran_at or now(), artifact_path, trials_at_run),
-        )
+    record_falsification_batch(
+        experiment_id,
+        [FalsificationResult(test_name, status, statistic, threshold)],
+        trials_at_run=trials_at_run, artifact_path=artifact_path, ran_at=ran_at,
+    )
 
 
 def close_trial(

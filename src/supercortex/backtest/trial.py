@@ -398,8 +398,9 @@ def _metrics(
             "profit_factor_net_state": str(conservative.profit_factor_net_state),
             "break_even_profit_factor": round(conservative.break_even_profit_factor, 6),
             "clears_break_even": conservative.clears_break_even,
-            # Written so `falsify.orchestrator.sharpe_variance_from_registry` finds the
-            # field it has always looked for. Same definition as Context.trade_returns().
+            # The same definition as Context.trade_returns(). The loader replays this
+            # copy as well as the one in the evidence block, so a reader quoting the
+            # headline is quoting a verified number rather than an unchecked one.
             "sharpe_per_trade": falsification_input["returns"]["sharpe_per_trade"],
         },
         # A LIST of pairs, not a dict: `json.dumps(sort_keys=True)` alphabetises dict

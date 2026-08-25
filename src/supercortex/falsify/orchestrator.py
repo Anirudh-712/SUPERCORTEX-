@@ -16,7 +16,7 @@ everything:
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -252,7 +252,11 @@ class Context:
     #: Per-configuration final results from the sweep, for the neighbourhood test.
     sweep_scores: dict[str, float] = field(default_factory=dict)
     chosen_config: str | None = None
-    #: Cross-trial Sharpe variance, when enough trials exist to estimate it honestly.
+    #: Cross-trial Sharpe variance. Nothing supplies this today and nothing may supply it
+    #: from unauthenticated bytes: the only source that ever existed read sibling metrics
+    #: documents straight off disk, with no digest, no registry binding and no provenance,
+    #: which made the DSR's deflation settable by anyone with write access. A future source
+    #: must be authenticated evidence or this field stays None.
     sharpe_variance: float | None = None
 
     def trade_returns(self) -> np.ndarray:
@@ -268,17 +272,21 @@ class Context:
     def effective_sharpe_variance(self) -> tuple[float, str]:
         """Variance of the Sharpe estimator, and an honest label for where it came from.
 
-        Preference order: the observed dispersion across this experiment's own trials, then
-        the asymptotic approximation Var(SR) ~ (1 + SR^2/2)/n. The label matters — a DSR
-        computed from an assumed variance is a weaker claim than one computed from measured
-        dispersion, and the report should say which it is.
+        Preference order: an authenticated measurement of dispersion across this
+        experiment's trials, then the asymptotic approximation Var(SR) ~ (1 + SR^2/2)/n.
+        The label matters — a DSR computed from an assumed variance is a weaker claim than
+        one computed from measured dispersion, and the report should say which it is.
+
+        Today it is always the approximation, and the label says why rather than implying
+        the desk had one trial. There is no authenticated cross-trial variance to have.
         """
         if self.sharpe_variance is not None and self.sharpe_variance > 0:
             return self.sharpe_variance, "measured across this experiment's trials"
         returns = self.trade_returns()
         n = max(returns.size, 2)
         sr = st.sharpe_ratio(returns)
-        return (1.0 + 0.5 * sr**2) / n, "asymptotic approximation (single trial)"
+        return (1.0 + 0.5 * sr**2) / n, ("asymptotic approximation; no authenticated "
+                                         "cross-trial variance available")
 
 
 # ── the tests ───────────────────────────────────────────────────────────────────
@@ -523,6 +531,72 @@ STATIC_TESTS: tuple[StaticTest, ...] = (
     test_benchmark,
 )
 
+#: The eleven numbered tests promotion requires, per §16.1 of the architecture report.
+#: Named here as a whole so a partial battery can say which tests it did NOT run. A report
+#: that lists only what it did read as a complete verdict, which is exactly how a strategy
+#: gets promoted on six tests out of eleven.
+PROMOTION_GATE_TESTS: tuple[str, ...] = tuple(str(n) for n in range(1, 12))
+
+
+def gate_number(name: str) -> str | None:
+    """The promotion-gate test a result belongs to, or None for a structural gate.
+
+    Read off the result's own name rather than a hand-kept list, so adding a static test
+    changes the coverage report by construction instead of leaving a second list to
+    forget.
+    """
+    head = name.split("-", 1)[0]
+    return head if head in PROMOTION_GATE_TESTS else None
+
+
+def covered_numbers(results: Sequence[TestResult]) -> tuple[str, ...]:
+    """Which of the eleven these results answer, in gate order."""
+    found = {gate_number(r.name) for r in results}
+    return tuple(n for n in PROMOTION_GATE_TESTS if n in found)
+
+
+def uncovered_numbers(results: Sequence[TestResult]) -> tuple[str, ...]:
+    """Which of the eleven these results leave unanswered. The honest half of the report."""
+    found = {gate_number(r.name) for r in results}
+    return tuple(n for n in PROMOTION_GATE_TESTS if n not in found)
+
+
+def structural_gates(results: Sequence[TestResult]) -> tuple[str, ...]:
+    """Results that are not one of the eleven: the structural gates, which block promotion
+    all the same."""
+    return tuple(r.name for r in results if gate_number(r.name) is None)
+
+
+#: What each promotion-gate test the static battery cannot run still needs before it can.
+#: Split because the two debts are not the same kind. An engine re-run is trial budget the
+#: desk can choose to spend today; test 8 cannot be run at any price until a variant family
+#: is registered AND Hansen's SPA / White's Reality Check are implemented. Reporting them
+#: together as "needs a re-run" says promotion is a budget decision when it is not.
+UNRUN_REQUIREMENTS: dict[str, str] = {
+    "1": "registered engine re-runs",
+    "2": "registered engine re-runs",
+    "4": "registered engine re-runs",
+    "11": "registered engine re-runs",
+    "8": "authenticated registered variant-family evidence, plus the SPA / Reality Check "
+         "implementation — neither exists yet",
+}
+
+#: For a test whose requirement nobody wrote down. It gets its own line rather than being
+#: dropped: a gap that vanishes from the report is a gap the desk stops seeing.
+UNRECORDED_REQUIREMENT = "an unrecorded prerequisite; nothing states what this test needs"
+
+
+def unrun_by_requirement(
+    results: Sequence[TestResult],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """The uncovered tests, grouped by what each still needs, in gate order."""
+    groups: dict[str, list[str]] = {}
+    for number in uncovered_numbers(results):
+        groups.setdefault(UNRUN_REQUIREMENTS.get(number, UNRECORDED_REQUIREMENT),
+                          []).append(number)
+    return tuple((need, tuple(numbers)) for need, numbers in groups.items())
+
+
 #: Tests requiring engine re-runs, with their cost in registered trials.
 DYNAMIC_TEST_COSTS: dict[str, int] = {
     "1-lookahead": 6,          # 3 probes x 2 channels
@@ -567,41 +641,6 @@ def dynamic_trial_cost(channels: int = 2) -> int:
     cost = dict(DYNAMIC_TEST_COSTS)
     cost["1-lookahead"] = 3 * channels
     return sum(cost.values())
-
-
-def sharpe_variance_from_registry(experiment_id: str) -> float | None:
-    """Dispersion of Sharpe across this experiment's own sealed trials.
-
-    Preferred over the asymptotic approximation because it is measured rather than
-    assumed — and it is only available at all because the registry kept every trial.
-    """
-    import json
-
-    from supercortex.registry import db
-
-    with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT metrics_path FROM trial WHERE experiment_id = ? AND outcome = 'ok'"
-            " AND metrics_path IS NOT NULL",
-            (experiment_id,),
-        ).fetchall()
-
-    sharpes: list[float] = []
-    for row in rows:
-        path = PROJECT_ROOT / row["metrics_path"]
-        if not path.exists():
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            value = payload.get("trades", {}).get("sharpe_per_trade")
-            if value is not None:
-                sharpes.append(float(value))
-        except Exception:
-            continue
-
-    if len(sharpes) < 3:
-        return None
-    return float(np.var(sharpes, ddof=1))
 
 
 def annualisation_factor(trades: list[Trade]) -> float:

@@ -889,8 +889,9 @@ def test_a_non_finite_reconciliation_value_is_refused(catalog_desk, value):
 
 
 def test_the_top_level_sharpe_is_verified_too(catalog_desk):
-    """`sharpe_variance_from_registry` reads metrics.trades.sharpe_per_trade directly, so
-    validating only the evidence block would leave the DSR's input tamperable."""
+    """The number appears twice in the document. Validating only the evidence block would
+    leave the headline copy free to say something else, and a reader quoting the headline
+    would be quoting an unreplayed number out of a document labelled verified."""
     edit(artifact(catalog_desk),
          lambda d: d["trades"].__setitem__("sharpe_per_trade", 9.99))
     diagnostic = refusal(artifact(catalog_desk))

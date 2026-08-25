@@ -66,6 +66,7 @@ class Code(StrEnum):
     TRIAL_NOT_SEALED = "TRIAL_NOT_SEALED"
     IDENTITY_ROW_MISMATCH = "IDENTITY_ROW_MISMATCH"
     METRICS_IDENTITY_MISMATCH = "METRICS_IDENTITY_MISMATCH"
+    REQUESTED_TRIAL_MISMATCH = "REQUESTED_TRIAL_MISMATCH"
     ARTIFACT_PATH_MISMATCH = "ARTIFACT_PATH_MISMATCH"
     CONFIG_PATH_UNSAFE = "CONFIG_PATH_UNSAFE"
     DATASET_PATH_UNSAFE = "DATASET_PATH_UNSAFE"
@@ -299,9 +300,14 @@ class Unverifiable(RuntimeError):
 class TrialEvidence:
     """Everything falsification needs, and nothing it does not.
 
-    Deliberately absent, because they are not sealed and must be read at verdict time:
-    `trials_consumed` (the registry's count now, not the count when this trial ran) and
-    `sharpe_variance` (measured across the experiment's trials as they stand today).
+    Deliberately absent because it is not sealed and must be read at verdict time:
+    `trials_consumed` — the registry's count now, not the count when this trial ran.
+
+    `sharpe_variance` is absent for a different reason. No authenticated source of
+    cross-trial dispersion exists: reading it off sibling artifacts means trusting bytes
+    with no digest and no registry binding, so the battery uses the asymptotic
+    approximation and labels it as such.
+
     Also absent: sweep returns and variant-family membership, which no producer writes yet.
     """
 
@@ -337,6 +343,17 @@ def _refuse(code: Code, message: str, **fields: object) -> Unverifiable:
         observed=_clip(fields.get("observed")),
         artifact=_clip_path(fields.get("artifact")),
     ))
+
+
+def refusal(code: Code, message: str, **fields: object) -> Unverifiable:
+    """Build a refusal from outside this module.
+
+    Public so a caller that discovers a trial cannot be verified — a sequence the registry
+    never recorded, a row with no sealed artifact — raises the same shape this module
+    does, clipped fields and all, instead of hand-building a `Diagnostic` that drifts from
+    it. There is one refusal vocabulary and one refusal shape.
+    """
+    return _refuse(code, message, **fields)
 
 
 def _require(mapping: object, key: str, kind: type | tuple[type, ...],
@@ -408,6 +425,18 @@ def _safe_relative(candidate: object, root: Path) -> Path | None:
     if not resolved.is_relative_to(root.resolve()):
         return None
     return resolved
+
+
+def confined_path(candidate: object, root: Path) -> Path | None:
+    """`_safe_relative`, for callers outside this module.
+
+    Public because a registry-recorded path needs the same confinement an evidence-recorded
+    one gets, and it needs it BEFORE the file is opened. `verify` reads the document as its
+    first act, so a path checked only inside the loader has already been read by the time
+    it is rejected — and on this desk the neighbouring files are `.env` and the Keychain.
+    One definition of "inside the project", applied at every entry point.
+    """
+    return _safe_relative(candidate, root)
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
@@ -1320,8 +1349,11 @@ def _verify_headline(document: dict[str, Any], block: dict[str, Any],
     replayed_sharpe = evidence.sharpe_per_trade(replayed_returns)
     for where, sealed in (("returns.sharpe_per_trade",
                            returns_block.get("sharpe_per_trade")),
-                          # read directly by `sharpe_variance_from_registry`, so verifying
-                          # only the evidence block would leave the DSR input tamperable
+                          # The same number appears twice in the document. Verifying only
+                          # the evidence block would leave the headline copy free to say
+                          # something else, and a reader quoting the headline would then be
+                          # quoting an unreplayed number out of a document labelled
+                          # verified.
                           ("trades.sharpe_per_trade", headline.get("sharpe_per_trade"))):
         value = _number(sealed, where, **ident)
         if not math.isclose(replayed_sharpe, value, rel_tol=1e-12, abs_tol=1e-15):
