@@ -22,6 +22,37 @@ CARDS_DIR = db.PROJECT_ROOT / "05-data"
 #: What a kind's fields do and do not mean. Stated on the card because the alternative is
 #: that a reader assumes, and the assumption that matters here is expensive.
 SEMANTICS = {
+    "metrics": """
+## How a repeated or late observation is resolved
+
+Binance publishes these observations one file per day. The files repeat timestamps, overlap
+at the boundary, and jitter a second or two off the five-minute grid. All three are settled
+explicitly when the archives are read together — never by a deduplication further down the
+pipeline, which cannot tell a harmless repeat from a real disagreement.
+
+Each raw observation is mapped to its nearest **five-minute slot**; a stamp further than
+5,000 ms from any slot **refuses**, because it is not that slot's observation and choosing
+one for it would invent a measurement time. The slot's UTC date names the **owning
+archive**, and candidates delivered by the owner are preferred.
+
+Where the owner supplies no candidate, one delivered by a neighbouring archive is kept as
+an explicit **delivery fallback**: the venue has published a slot's only observation in the
+previous day's file, and dropping it would lose a real measurement and open a gap that
+nothing caused. The retained row keeps **its own timestamp** — the slot is identity and
+ownership metadata, not a replacement for what the venue reported.
+
+Among the preferred candidates, rows collapse into one **only when identical in every
+field, null state included**. A null ratio and a present one are different observations.
+
+If candidates for one slot disagree anywhere, the build **refuses** and names the slot, the
+delivering archives and the differing fields. This is not resolved for you: there is no
+honest way to choose between two conflicting measurements of one instant, and the order
+they happened to appear in says nothing about which is right. The venue has to be asked.
+
+The counts under **Notes** — `exact_repeat_rows_removed`, `non_owner_candidates_ignored`,
+`delivery_fallback_rows` and `max_grid_jitter_ms` — are computed by the build that produced
+this file, not carried over from a previous one.
+""",
     "mark_price": """
 ## What these fields are, and what they are not
 
@@ -92,30 +123,19 @@ def build(
     market: str = typer.Option("um", "--market"),
     interval: str = typer.Option("1m", "--interval"),
 ) -> None:
-    """L0 → L1. Normalise, dedupe, validate, inventory gaps, write Parquet."""
+    """L0 → L1. Normalise, validate, inventory gaps, write Parquet.
+
+    Nothing is deduplicated: two rows claiming one instant both reach the validator, which
+    reports them rather than one being silently dropped.
+    """
     symbol = symbol.upper()
     archives = [
         sources.Archive(market, symbol, "klines", p, interval)
         for p in sources.months(_parse_month(start), _parse_month(end))
     ]
     out = canonical.CATALOG_ROOT / "klines" / f"{symbol}.{market}" / f"{interval}.parquet"
-    path, report = canonical.build(archives, interval, out)
-
-    table = Table(show_header=False)
-    table.add_row("rows", f"{report.rows:,}")
-    table.add_row("range", f"{report.start[:19]} → {report.end[:19]}")
-    table.add_row("completeness", f"{report.completeness:.4%}")
-    table.add_row("gaps", f"{len(report.gaps)} spanning "
-                          f"{sum(g['missing_bars'] for g in report.gaps):,} bars")
-    table.add_row("duplicates", str(report.duplicates))
-    table.add_row("size", f"{path.stat().st_size / 1024**2:.1f} MB")
-    console.print(table)
-
-    if report.violations:
-        for violation in report.violations:
-            console.print(f"[red]VIOLATION[/] {violation}")
-        raise typer.Exit(1)
-    console.print(f"[green]L1 written[/] {path.relative_to(db.PROJECT_ROOT)}")
+    _built(archives, canonical.read_klines,
+           lambda frame: canonical.validate(frame, interval), out)
 
 
 KINDS = {
@@ -153,6 +173,20 @@ def _built(
     """
     try:
         path, report = canonical.build_generic(archives, reader, validator, out)
+    except canonical.BuildRefused as refusal:
+        for violation in (refusal.report.violations if refusal.report else []):
+            console.print(f"[red]VIOLATION[/] {violation}")
+        console.print(f"[red]build refused[/] — {refusal}")
+        raise typer.Exit(1) from refusal
+    console.print(_report_table(report, path))
+    console.print(f"[green]L1 written[/] {path.relative_to(db.PROJECT_ROOT)}")
+    return path
+
+
+def _built_metrics(archives: list[sources.Archive], out: Path) -> Path:
+    """`build_metrics`, with the same refusal reporting as every other build."""
+    try:
+        path, report = canonical.build_metrics(archives, out)
     except canonical.BuildRefused as refusal:
         for violation in (refusal.report.violations if refusal.report else []):
             console.print(f"[red]VIOLATION[/] {violation}")
@@ -238,6 +272,23 @@ def card(
 
     frame = pl.read_parquet(path)
     report = _validate_for(kind, frame, interval)
+    # `card` re-reads the file and builds a FRESH report, so anything a build computed
+    # about normalisation exists only in that build's memory by now. The facts it recorded
+    # with the artifact are merged back in.
+    #
+    # For metrics the card's own prose states all four appear under Notes, so they are
+    # REQUIRED: registering a file whose metadata cannot supply them would publish that
+    # claim without the evidence. Every other kind merges leniently - they claim nothing.
+    if kind == "metrics":
+        try:
+            report.notes.update(canonical.require_metrics_facts(path))
+        except canonical.FactsUnavailable as missing:
+            console.print(f"[red]{path.name} cannot be carded[/] — {missing}")
+            console.print("Rebuild L1 with `uv run supercortex data build-metrics` so the "
+                          "normalisation facts are recorded with the file.")
+            raise typer.Exit(1) from missing
+    else:
+        report.notes.update(canonical.stored_facts(path))
     if report.violations:
         # Before the ID is allocated, before the row is written, before the card exists. A
         # card is a claim that a dataset may back a trial; registering one the validator
@@ -585,4 +636,4 @@ def build_metrics(
         for d in sources.days(_parse_day(start), _parse_day(end))
     ]
     out = canonical.CATALOG_ROOT / "metrics" / f"{symbol}.{market}" / "metrics.parquet"
-    _built(archives, canonical.read_metrics, canonical.validate_metrics, out)
+    _built_metrics(archives, out)

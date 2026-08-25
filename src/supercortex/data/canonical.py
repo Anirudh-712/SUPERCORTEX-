@@ -5,6 +5,7 @@ reproducing L1 byte-for-byte, we have a data swamp rather than a data lake.
 """
 from __future__ import annotations
 
+import dataclasses
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -244,17 +245,21 @@ def validate(frame: pl.DataFrame, interval: str) -> QualityReport:
 
 
 def build(archives: list[Archive], interval: str, out: Path) -> tuple[Path, QualityReport]:
-    """Concatenate L0 archives into one validated L1 Parquet file."""
-    frames = [read_klines(a) for a in archives if a.local.exists()]
-    if not frames:
-        raise RuntimeError("no L0 archives present — run `supercortex data fetch` first")
+    """Concatenate the requested kline archives into one validated L1 Parquet file.
 
-    combined = pl.concat(frames).unique(subset=["ts_ms"], keep="first").sort("ts_ms")
-    report = validate(combined, interval)
+    A thin binding over `build_generic`, which owns the guarantees: every requested
+    archive present and readable, no row discarded before validation, and the canonical
+    file replaced only after the validator is satisfied.
 
-    out.parent.mkdir(parents=True, exist_ok=True)
-    combined.write_parquet(out, compression="zstd", statistics=True)
-    return out, report
+    This used to be a second implementation of those same steps, and it had none of them -
+    it deduplicated on `ts_ms` before validating, skipped absent months, and wrote the
+    file before checking violations. Two copies of one operation is how they came to
+    disagree; the fix is one copy, not a matching patch.
+
+    Only the interval is bound here, because `validate` needs it to know what a gap is and
+    `build_generic` is deliberately ignorant of any particular series.
+    """
+    return build_generic(archives, read_klines, lambda frame: validate(frame, interval), out)
 
 
 def expected_bar_count(start: datetime, end: datetime, interval: str) -> int:
@@ -482,7 +487,44 @@ METRICS_COLUMNS = [
     "count_toptrader_long_short_ratio", "sum_toptrader_long_short_ratio",
     "count_long_short_ratio", "sum_taker_long_short_vol_ratio",
 ]
-METRICS_STEP_MS = 300_000  # 5 minutes
+
+
+
+class MetricsOwnershipError(ValueError):
+    """A metrics observation cannot be attributed to one archive with confidence."""
+
+
+#: The published observation grid, and how far off it a stamp may sit. Binance's metrics
+#: stamps jitter by a second or two; beyond a few seconds the row is not that slot's
+#: observation and guessing which one it is would be inventing a measurement time.
+#: The published observation grid. One constant: an observation's identity IS its slot,
+#: so the step used to count expected rows and the step used to assign ownership cannot be
+#: allowed to drift apart.
+METRICS_GRID_MS = 300_000
+METRICS_MAX_JITTER_MS = 5_000
+
+#: Every canonical metrics field, in order. Row identity is all of them, `ts_ms` included,
+#: and null counts as a value: a missing ratio and a present one are different
+#: observations, not a repeat.
+METRICS_CANONICAL = ("ts_ms", "ts", "open_interest", "open_interest_value",
+                     "toptrader_accounts_ls", "toptrader_positions_ls",
+                     "all_accounts_ls", "taker_volume_ls")
+
+
+def _as_int(value: object) -> int:
+    """A Series aggregate that must be an integer, checked rather than cast blindly."""
+    if value is None:
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise MetricsOwnershipError(
+            f"grid jitter aggregated to {type(value).__name__}, expected an integer "
+            f"millisecond count; the slot columns are not Int64"
+        )
+    return value
+
+
+def _stamp(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def read_metrics(archive: Archive) -> pl.DataFrame:
@@ -531,43 +573,69 @@ def read_metrics(archive: Archive) -> pl.DataFrame:
 
 
 def validate_metrics(frame: pl.DataFrame) -> QualityReport:
-    """Metrics arrive on a 5-minute grid: 288 observations per day."""
+    """What we know about a metrics series, judged on the observation grid.
+
+    A metrics observation's identity is its five-minute **slot**, not the exact stamp the
+    venue happened to publish. Counting expected rows from the raw endpoints is wrong in
+    both directions: a pair jittered +5 s and -5 s spans 290,000 ms, which floor-divides to
+    `expected_rows=1` for two rows and reports 200% complete. Duplicates, monotonicity and
+    gaps are all questions about observations, so all four are asked of the slot.
+
+    The reported range stays raw — that is what the venue said — and L1 keeps the raw
+    stamps. Only identity is normalised.
+    """
     violations: list[str] = []
     if frame.height == 0:
         return QualityReport(0, "", "", 0, violations=["empty dataset"])
 
-    ts = frame["ts_ms"]
-    duplicates = frame.height - ts.n_unique()
-    non_monotonic = int((ts.diff().drop_nulls() <= 0).sum())
+    slotted = frame.with_columns(
+        (((pl.col("ts_ms") + METRICS_GRID_MS // 2) // METRICS_GRID_MS) * METRICS_GRID_MS)
+        .alias("_slot")
+    ).with_columns((pl.col("ts_ms") - pl.col("_slot")).abs().alias("_jitter"))
 
-    gaps, off_grid = _gap_scan(frame, METRICS_STEP_MS)
-
-    low, high = _epoch_bounds(ts)
-    if duplicates:
-        violations.append(f"{duplicates} duplicate timestamps")
-    if non_monotonic:
-        violations.append(f"{non_monotonic} non-monotonic timestamps")
     if frame.filter(pl.col("open_interest") < 0).height:
         violations.append("negative open interest")
 
-    # The crowding ratios are sparser than open interest itself: Binance leaves them null
-    # in ~0.9% of observations. Not a defect, but a strategy that reads them must handle
-    # the hole rather than forward-filling it into a stale signal.
-    null_notes: dict[str, object] = {}
+    off_grid = slotted.filter(pl.col("_jitter") > METRICS_MAX_JITTER_MS).height
+    if off_grid:
+        violations.append(
+            f"{off_grid} observation(s) sit further than {METRICS_MAX_JITTER_MS} ms from "
+            f"the {METRICS_GRID_MS // 60_000}-minute grid"
+        )
+
+    slots = slotted["_slot"]
+    duplicates = frame.height - slots.n_unique()
+    non_monotonic = int((slots.diff().drop_nulls() <= 0).sum())
+    if duplicates:
+        violations.append(f"{duplicates} duplicate observation slots")
+    if non_monotonic:
+        violations.append(f"{non_monotonic} non-monotonic observation slots")
+
+    gaps, jitter_steps = _gap_scan(
+        slotted.select(pl.col("_slot").alias("ts_ms")), METRICS_GRID_MS)
+    low_slot, high_slot = _epoch_bounds(slots)
+    expected = (high_slot - low_slot) // METRICS_GRID_MS + 1
+
+    raw_low, raw_high = _epoch_bounds(frame["ts_ms"])
+    notes: dict[str, object] = {"off_grid": int(
+        slotted.filter(pl.col("_jitter") > 0).height)}
+    if jitter_steps:
+        notes["irregular_slot_steps"] = jitter_steps
     for column in ("toptrader_accounts_ls", "toptrader_positions_ls",
                    "all_accounts_ls", "taker_volume_ls"):
-        if column in frame.columns:
-            nulls = int(frame[column].null_count())
-            if nulls:
-                null_notes[f"nulls_{column}"] = nulls
+        if column in frame.columns and frame[column].null_count():
+            notes[f"nulls_{column}"] = frame[column].null_count()
 
     return QualityReport(
         rows=frame.height,
-        start=datetime.fromtimestamp(low / 1000, UTC).isoformat(),
-        end=datetime.fromtimestamp(high / 1000, UTC).isoformat(),
-        expected_rows=(high - low) // METRICS_STEP_MS + 1, gaps=gaps,
-        duplicates=duplicates, non_monotonic=non_monotonic, violations=violations,
-        notes={**({"off_grid": off_grid} if off_grid else {}), **null_notes},
+        start=datetime.fromtimestamp(raw_low / 1000, UTC).isoformat(),
+        end=datetime.fromtimestamp(raw_high / 1000, UTC).isoformat(),
+        expected_rows=expected,
+        gaps=gaps,
+        duplicates=duplicates,
+        non_monotonic=non_monotonic,
+        violations=violations,
+        notes=notes,
     )
 
 
@@ -583,30 +651,155 @@ class BuildRefused(RuntimeError):
         self.report = report
 
 
-def build_generic(
+def canonical_metrics(
     archives: list[Archive],
-    reader: Callable[[Archive], pl.DataFrame],
-    validator: Callable[[pl.DataFrame], QualityReport],
-    out: Path,
-) -> tuple[Path, QualityReport]:
-    """Concatenate the requested L0 archives into one validated L1 Parquet file.
+) -> tuple[pl.DataFrame, dict[str, object]]:
+    """Reconcile daily metrics archives into one canonical series, with audit facts.
 
-    Three things this function must not do, each of which it used to:
+    The rule, in order:
 
-    * **Deduplicate.** `unique(subset=["ts_ms"])` erased exactly the defect the validators
-      exist to find, and it chose which of two rows claiming the same instant to keep - a
-      decision nobody made and nobody could see. Every row read is a row validated.
-    * **Build from whatever happened to be on disk.** Skipping absent archives measures
-      completeness between the observed first and last row, so a truncated window reports
-      as complete. The requested span is what was asked for.
-    * **Write before validating.** The canonical file was replaced and only then checked,
-      so a refused build left the invalid result in place of the good one.
+    1. Every raw observation is mapped to its nearest five-minute **slot**. A stamp further
+       than `METRICS_MAX_JITTER_MS` from any slot is refused - it is not that slot's
+       observation, and guessing which one it is would invent a measurement time.
+    2. The slot's UTC date names the **owning archive**.
+    3. Candidates delivered by the owner are preferred.
+    4. If the owner supplies none, a candidate delivered by another archive is kept as an
+       explicit **delivery fallback**. Binance has published a slot's only observation in
+       the previous day's file; dropping it would lose a real measurement and open a gap
+       that nothing caused.
+    5. Among the preferred candidates, rows collapse only when identical in every canonical
+       field, null state included. Disagreement refuses and names the slot, the delivering
+       archives and the differing fields.
+
+    Delivery order is never a tie-break: which row appeared first says nothing about which
+    is true. The retained row keeps its own timestamp - the slot is identity and ownership
+    metadata, not a replacement for what the venue reported.
+    """
+    frames = []
+    for archive in archives:
+        frame = _read_all([archive], read_metrics)[0]
+        slot = (((pl.col("ts_ms") + METRICS_GRID_MS // 2) // METRICS_GRID_MS)
+                * METRICS_GRID_MS)
+        frames.append(
+            frame.with_columns(
+                slot.alias("_slot"),
+                pl.lit(archive.period).alias("_delivered_by"),
+                pl.lit(archive.stem).alias("_source"),
+            ).with_columns(
+                (pl.col("ts_ms") - pl.col("_slot")).abs().alias("_jitter")
+            )
+        )
+    combined = pl.concat(frames)
+
+    stray = combined.filter(pl.col("_jitter") > METRICS_MAX_JITTER_MS)
+    if stray.height:
+        first = stray.sort("ts_ms").row(0, named=True)
+        raise MetricsOwnershipError(
+            f"{first['_source']} holds {stray.height} observation(s) further than "
+            f"{METRICS_MAX_JITTER_MS} ms from any five-minute slot, the first at "
+            f"{_stamp(first['ts_ms'])} ({first['_jitter']} ms off). A stamp that far from "
+            f"the grid is not that slot's observation, and choosing a slot for it would "
+            f"invent a measurement time the venue never reported."
+        )
+
+    # Measured here, over every candidate that cleared the tolerance check and before
+    # preference or deduplication removes any. Taken later it would describe what survived
+    # rather than what was observed - and the most jittered row is often precisely the
+    # non-owner copy that gets ignored.
+    max_jitter = _as_int(combined["_jitter"].max())
+
+    combined = combined.with_columns(
+        (pl.from_epoch("_slot", time_unit="ms").dt.date() == pl.col("_delivered_by"))
+        .alias("_owner")
+    )
+    owned_slots = combined.group_by("_slot").agg(pl.col("_owner").any().alias("_has_owner"))
+    combined = combined.join(owned_slots, on="_slot", how="left")
+
+    # A fallback is only a fallback if it is a neighbour AND the owner was actually asked.
+    # Without both, "the owner supplied none" is a claim about an archive that was never
+    # read, and any file could vouch for any day.
+    supplied = {a.period for a in archives}
+    combined = combined.with_columns(
+        pl.from_epoch("_slot", time_unit="ms").dt.date().alias("_owner_day")
+    ).with_columns(
+        ((pl.col("_owner_day") - pl.col("_delivered_by")).dt.total_days().abs() == 1)
+        .alias("_adjacent"),
+        pl.col("_owner_day").is_in(list(supplied)).alias("_owner_supplied"),
+    )
+
+    ineligible = combined.filter(
+        ~pl.col("_owner") & ~pl.col("_has_owner")
+        & (~pl.col("_adjacent") | ~pl.col("_owner_supplied"))
+    )
+    if ineligible.height:
+        row = ineligible.sort("ts_ms").row(0, named=True)
+        why = ("was not supplied, so it cannot be said to have supplied nothing"
+               if not row["_owner_supplied"]
+               else "is not adjacent to the delivering archive, so this is not a boundary "
+                    "overlap")
+        # The owner's name is derived from a supplied archive's own market, symbol and
+        # kind. Spelling it out would name a file that does not exist for any symbol but
+        # the one that happened to be hardcoded.
+        template = archives[0]
+        owner_name = dataclasses.replace(template, period=row["_owner_day"]).stem
+        raise MetricsOwnershipError(
+            f"{ineligible.height} observation(s) have no eligible source. At "
+            f"{_stamp(int(row['_slot']))} the only candidate was delivered by "
+            f"{row['_source']}, but the owning archive {owner_name} {why}."
+        )
+
+    preferred = combined.filter(pl.col("_owner") | ~pl.col("_has_owner"))
+    non_owner_ignored = combined.height - preferred.height
+
+    # Exact-row identity over the canonical fields only: the delivering archive is
+    # metadata, so the same observation shipped in two files is one observation.
+    # `keep="any"` because for identical rows the choice is immaterial by definition -
+    # that is the absence of a tie-break, not the use of one.
+    distinct = preferred.unique(subset=list(METRICS_CANONICAL), keep="any")
+    exact_repeats = preferred.height - distinct.height
+
+    clashes = (
+        distinct.group_by("_slot")
+        .agg(pl.len().alias("n"),
+             *[pl.col(c).n_unique().alias(c) for c in METRICS_CANONICAL if c != "ts"],
+             pl.col("_source").unique().sort().alias("_sources"))
+        .filter(pl.col("n") > 1)
+        .sort("_slot")
+    )
+    if clashes.height:
+        row = clashes.row(0, named=True)
+        fields = [c for c in METRICS_CANONICAL if c not in ("ts",) and row[c] > 1]
+        raise MetricsOwnershipError(
+            f"{clashes.height} five-minute slot(s) have candidates that disagree. At "
+            f"{_stamp(int(row['_slot']))}, delivered by {', '.join(row['_sources'])}, they "
+            f"differ in: {', '.join(fields) or 'null state'}. Two rows claiming one "
+            f"observation with different values is not a repeat, and the order they "
+            f"appeared in says nothing about which is right - the venue must be asked."
+        )
+
+    fallback_rows = distinct.filter(~pl.col("_has_owner")).height
+    facts: dict[str, object] = {
+        "exact_repeat_rows_removed": exact_repeats,
+        "non_owner_candidates_ignored": non_owner_ignored,
+        "delivery_fallback_rows": fallback_rows,
+        # `Series.max()` is typed as the union of every dtype a Series may hold, so the
+        # int is asserted rather than assumed: a non-integer here would mean `_jitter`
+        # was built from something other than two Int64 columns.
+        "max_grid_jitter_ms": max_jitter,
+    }
+    return distinct.select(METRICS_CANONICAL).sort("ts_ms"), facts
+
+
+def _require_archives(archives: list[Archive]) -> None:
+    """Every requested archive present, or nothing is built.
+
+    Skipping absent ones measures completeness between the observed first and last row, so
+    a truncated window reports as complete.
     """
     if not archives:
         raise BuildRefused(
             "no archives requested, so there is nothing to build and no span to check"
         )
-
     missing = [a for a in archives if not a.local.exists()]
     if missing:
         raise BuildRefused(
@@ -615,33 +808,219 @@ def build_generic(
             f"silently skips a month reports the months it did read as complete."
         )
 
+
+def _read_all(
+    archives: list[Archive], reader: Callable[[Archive], pl.DataFrame]
+) -> list[pl.DataFrame]:
+    """Read every archive, naming the one that fails."""
     frames = []
     for archive in archives:
         try:
             frames.append(reader(archive))
+        except BuildRefused:
+            raise
         except Exception as exc:
             raise BuildRefused(
                 f"{archive.stem} is present but could not be read: {exc}"
             ) from exc
+    return frames
 
-    # No dedup: two rows claiming one instant both reach the validator. The sort is stable
-    # so that a report cannot depend on an arbitrary tie order — belt and braces rather
-    # than a load-bearing guarantee, since a frame carrying ties is refused before
-    # anything is persisted, and no test can observe the difference.
-    combined = pl.concat(frames).sort("ts_ms", maintain_order=True)
+
+#: Where computed normalisation facts live inside the Parquet footer, and exactly which
+#: keys a reader will accept back. The file is untrusted input like any other: `card`
+#: builds a fresh report and merges these in, so an unknown or wrongly-typed key is
+#: dropped rather than printed onto a dataset card as though the build had produced it.
+FACTS_KEY = "supercortex.build_facts"
+FACT_FIELDS: dict[str, type] = {
+    "exact_repeat_rows_removed": int,
+    "non_owner_candidates_ignored": int,
+    "delivery_fallback_rows": int,
+    "max_grid_jitter_ms": int,
+}
+
+
+#: What a metrics L1 must record about how it was normalised before it may be carded. The
+#: card's prose states all four appear under Notes; registering one whose metadata cannot
+#: supply them publishes that claim without the evidence.
+REQUIRED_METRICS_FACTS = ("exact_repeat_rows_removed", "non_owner_candidates_ignored",
+                          "delivery_fallback_rows", "max_grid_jitter_ms")
+
+
+class FactsUnavailable(ValueError):
+    """An L1 file records no usable build facts, so it cannot be carded."""
+
+
+def require_metrics_facts(path: Path) -> dict[str, int]:
+    """The four normalisation facts, or a refusal naming exactly what is wrong.
+
+    Separate from `stored_facts` on purpose. That one is a lenient parser - it answers
+    "what does this file record?" and a file recording nothing is a legitimate answer. This
+    one is a gate, and it has to tell "records nothing" apart from "records four good
+    numbers", which a dictionary that is empty in both cases cannot.
+    """
+    import json
+
+    try:
+        raw = pl.read_parquet_metadata(path).get(FACTS_KEY)
+    except Exception as exc:
+        raise FactsUnavailable(
+            f"{path.name} could not be read for build facts: {exc}"
+        ) from exc
+    if raw is None:
+        raise FactsUnavailable(
+            f"{path.name} carries no build facts. It was written before this metadata "
+            f"existed, or by something other than the metrics build."
+        )
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise FactsUnavailable(
+            f"the build facts in {path.name} could not be read as JSON: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise FactsUnavailable(
+            f"the build facts in {path.name} are a {type(payload).__name__}, expected an "
+            f"object"
+        )
+
+    facts: dict[str, int] = {}
+    problems: list[str] = []
+    for key in REQUIRED_METRICS_FACTS:
+        if key not in payload:
+            problems.append(f"{key} is missing")
+            continue
+        value = payload[key]
+        # `True` is an `int` in Python, and a flag recorded where a count belongs is a
+        # different defect from a count that is merely wrong.
+        if isinstance(value, bool) or not isinstance(value, int):
+            problems.append(f"{key} is {type(value).__name__}, expected an integer")
+        elif value < 0:
+            problems.append(f"{key} is {value}, which cannot be a count")
+        else:
+            facts[key] = value
+
+    jitter = facts.get("max_grid_jitter_ms")
+    if jitter is not None and jitter > METRICS_MAX_JITTER_MS:
+        problems.append(
+            f"max_grid_jitter_ms is {jitter}, beyond the {METRICS_MAX_JITTER_MS} ms "
+            f"tolerance this build enforces"
+        )
+    if problems:
+        raise FactsUnavailable(
+            f"the build facts in {path.name} are unusable: {'; '.join(problems)}"
+        )
+    return facts
+
+
+def stored_facts(path: Path) -> dict[str, object]:
+    """The build facts recorded with an L1 file: known keys, right types, nothing else."""
+    import json
+
+    # `pl.read_parquet_metadata` rather than pyarrow: pyarrow ships no py.typed marker, and
+    # ADR-014's rule is that an untyped boundary stays visible rather than being silenced
+    # with a per-module override. Polars is typed and returns the same footer map.
+    try:
+        raw = pl.read_parquet_metadata(path).get(FACTS_KEY)
+    except Exception:
+        return {}
+    if raw is None:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        key: value for key, value in payload.items()
+        if key in FACT_FIELDS
+        and isinstance(value, FACT_FIELDS[key])
+        and not isinstance(value, bool)
+    }
+
+
+def _validate_and_write(
+    combined: pl.DataFrame,
+    validator: Callable[[pl.DataFrame], QualityReport],
+    out: Path,
+    notes: dict[str, object] | None = None,
+    facts: dict[str, object] | None = None,
+) -> tuple[Path, QualityReport]:
+    """Validate a canonical frame and, only if it passes, put it at `out` atomically.
+
+    The single implementation of that step. Every kind reaches Parquet through here, which
+    is what stops two copies of the same operation drifting apart again.
+    """
     report = validator(combined)
+    if notes:
+        report.notes.update(notes)
+    if report.violations:
+        # Before anything else. Rechunking materialises a full copy and staging puts bytes
+        # on disk beside a good L1, both for a frame already known to be invalid.
+        raise BuildRefused(
+            f"{out.name} was not written: {'; '.join(report.violations)}", report
+        )
+
+    # One contiguous chunk before writing, and only after the validator is satisfied.
+    # `pl.concat` yields a chunk per archive and polars writes row groups on chunk
+    # boundaries, so without this the bytes encode how the request was decomposed rather
+    # than what the data is. Deliberately after validation - this materialises a full copy,
+    # and a frame about to be refused should not pay for one.
+    combined = combined.rechunk()
 
     out.parent.mkdir(parents=True, exist_ok=True)
     staged = out.with_name(out.name + ".building")
     try:
-        combined.write_parquet(staged, compression="zstd", statistics=True)
-        if report.violations:
-            raise BuildRefused(
-                f"{out.name} was not written: {'; '.join(report.violations)}", report
-            )
+        combined.write_parquet(
+            staged, compression="zstd", statistics=True,
+            # Only when a build computed facts, so no other kind's bytes move.
+            metadata={FACTS_KEY: __import__("json").dumps(facts, sort_keys=True)}
+            if facts else None,
+        )
         # Same directory, so this is an atomic rename rather than a copy: either the old
         # L1 is intact or the new one is complete, never a half-written file.
         staged.replace(out)
     finally:
         staged.unlink(missing_ok=True)
     return out, report
+
+
+def build_generic(
+    archives: list[Archive],
+    reader: Callable[[Archive], pl.DataFrame],
+    validator: Callable[[pl.DataFrame], QualityReport],
+    out: Path,
+) -> tuple[Path, QualityReport]:
+    """Concatenate the requested L0 archives into one validated L1 Parquet file.
+
+    Deliberately performs no deduplication. `unique(subset=["ts_ms"])` here erased exactly
+    the defect the validators exist to find, and chose which of two rows claiming one
+    instant to keep - a decision nobody made and nobody could see. Where a series genuinely
+    needs cross-archive reconciliation, that belongs in a reader that knows the series, not
+    in this boundary: see `build_metrics`.
+    """
+    _require_archives(archives)
+    frames = _read_all(archives, reader)
+    combined = pl.concat(frames).sort("ts_ms", maintain_order=True)
+    return _validate_and_write(combined, validator, out)
+
+
+def build_metrics(
+    archives: list[Archive], out: Path
+) -> tuple[Path, QualityReport]:
+    """L0 -> L1 for daily metrics, with slot ownership resolved across archives.
+
+    Ownership cannot be settled inside a single-archive read: whether a boundary row should
+    be kept depends on whether the OWNING archive supplies one, which is only knowable once
+    the neighbours have been read. So the reconciliation happens here, and the
+    validate-and-write step below is the same one every other kind uses.
+    """
+    _require_archives(archives)
+    try:
+        combined, facts = canonical_metrics(archives)
+    except MetricsOwnershipError as exc:
+        # The CLI reports refusals; an ownership error escaping as itself surfaced as an
+        # empty message and a bare non-zero exit.
+        raise BuildRefused(str(exc)) from exc
+    return _validate_and_write(combined, validate_metrics, out,
+                               notes=facts, facts=facts)
