@@ -29,6 +29,7 @@ CADENCE = {
     "klines": "monthly",
     "aggTrades": "monthly",
     "fundingRate": "monthly",
+    "markPriceKlines": "monthly",
     "premiumIndexKlines": "monthly",
     "metrics": "daily",
 }
@@ -39,6 +40,9 @@ CADENCE = {
 FIRST_AVAILABLE = {
     "klines": "2020-01-01",
     "fundingRate": "2020-01-01",
+    # Read from the venue's own object listing, not assumed: the 1m mark-price series is
+    # published for every month the funding series is, with none missing.
+    "markPriceKlines": "2020-01-01",
     "metrics": "2020-09-01",
 }
 

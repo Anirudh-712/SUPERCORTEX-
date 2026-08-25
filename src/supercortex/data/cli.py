@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import date, datetime
 from pathlib import Path
 
@@ -17,6 +18,33 @@ app = typer.Typer(no_args_is_help=True, help="Market data: fetch, build, verify.
 console = Console()
 
 CARDS_DIR = db.PROJECT_ROOT / "05-data"
+
+#: What a kind's fields do and do not mean. Stated on the card because the alternative is
+#: that a reader assumes, and the assumption that matters here is expensive.
+SEMANTICS = {
+    "mark_price": """
+## What these fields are, and what they are not
+
+This is the venue's published **mark-price kline** series. `open`, `high`, `low` and
+`close` are that series' own interval fields; `open` is **the archive's interval open
+field** and nothing more.
+
+Binance settles a perpetual funding payment on the mark price at the settlement instant.
+Whether this archive's `open` is that exact settlement mark is **unresolved**: the venue's
+kline documentation defines the fields but does not say whether the open is the mark
+observed at the interval's open time or the first sample taken inside the interval. This
+dataset therefore stores what Binance publishes and asserts no relationship to a funding
+settlement.
+
+Nothing in this dataset is aligned, adjusted or filled. Specifically there is no
+forward-fill, no interpolation, no traded-price substitution, and no settlement alignment
+of any kind. A missing minute is inventoried below and stays missing.
+
+The venue documents fields 6 and 8-12 of the raw archive as *Ignore*. They are discarded
+rather than renamed: a mark-price series has no traded volume and no trade count, and a
+column carrying those names would be a number somebody eventually believes.
+""",
+}
 
 
 def _parse_month(value: str) -> date:
@@ -91,10 +119,76 @@ def build(
 
 
 KINDS = {
-    "klines":  ("klines",       "{interval}.parquet",  "OHLCV bars"),
-    "funding": ("funding_rate", "funding.parquet",     "perpetual funding rate"),
-    "metrics": ("metrics",      "metrics.parquet",     "open interest + long/short ratios"),
+    "klines":     ("klines",       "{interval}.parquet", "OHLCV bars"),
+    "funding":    ("funding_rate", "funding.parquet",    "perpetual funding rate"),
+    "mark_price": ("mark_price",   "{interval}.parquet", "mark-price klines"),
+    "metrics":    ("metrics",      "metrics.parquet",    "open interest + long/short ratios"),
 }
+
+#: The archive kind each registered kind is built from. The registered name is the desk's
+#: (`mark_price`); the source name is the venue's (`markPriceKlines`). Keeping both is what
+#: lets a card say where its bytes came from without the two ever being confused.
+SOURCE_KIND = {
+    "klines": "klines", "funding": "fundingRate",
+    "mark_price": "markPriceKlines", "metrics": "metrics",
+}
+
+
+#: The only interval this slice models. `validate_mark_price` assumes a sixty-second step
+#: unconditionally, so handing it a five-minute archive would report a clean series as
+#: one-minute data riddled with gaps. Widening this means widening the validator.
+MARK_PRICE_INTERVAL = "1m"
+
+
+def _built(
+    archives: list[sources.Archive],
+    reader: Callable[[sources.Archive], pl.DataFrame],
+    validator: Callable[[pl.DataFrame], canonical.QualityReport],
+    out: Path,
+) -> Path:
+    """Run a build, or turn its refusal into a diagnosis and a clean exit.
+
+    `build_generic` raises rather than returning a half-built dataset, and a raise that
+    escapes the CLI is a stack trace where an operator needed a sentence.
+    """
+    try:
+        path, report = canonical.build_generic(archives, reader, validator, out)
+    except canonical.BuildRefused as refusal:
+        for violation in (refusal.report.violations if refusal.report else []):
+            console.print(f"[red]VIOLATION[/] {violation}")
+        console.print(f"[red]build refused[/] — {refusal}")
+        raise typer.Exit(1) from refusal
+    console.print(_report_table(report, path))
+    console.print(f"[green]L1 written[/] {path.relative_to(db.PROJECT_ROOT)}")
+    return path
+
+
+def _require_mark_price_interval(interval: str) -> None:
+    """Refuse an interval the validator does not model, before anything else happens."""
+    if interval != MARK_PRICE_INTERVAL:
+        console.print(
+            f"[red]interval {interval!r} is not supported for mark-price klines[/] — "
+            f"this slice models {MARK_PRICE_INTERVAL!r} only, and the validator assumes "
+            f"that step unconditionally."
+        )
+        raise typer.Exit(1)
+
+
+#: The command that rebuilds each kind, and the granularity its --start/--end take. Both
+#: are written onto every card, so the command has to exist and the dates have to parse.
+#: `"build-" + kind` silently produced `build-mark_price`, which is not a command.
+REBUILD = {
+    "klines": ("build", "month"),
+    "funding": ("build-funding", "month"),
+    "mark_price": ("build-mark-price", "month"),
+    "metrics": ("build-metrics", "day"),
+}
+
+
+def _interval_label(kind: str, interval: str) -> str:
+    """A dataset's `interval` column: the real interval where the L1 file is per-interval,
+    the kind otherwise. Derived from the filename template rather than a second list."""
+    return interval if "{interval}" in KINDS[kind][1] else kind
 
 
 def _l1_path(symbol: str, market: str, kind: str, interval: str) -> Path:
@@ -110,15 +204,18 @@ def _validate_for(
         return canonical.validate(frame, interval)
     if kind == "funding":
         return canonical.validate_funding(frame)
+    if kind == "mark_price":
+        return canonical.validate_mark_price(frame)
     return canonical.validate_metrics(frame)
 
 
 @app.command("card")
 def card(
     symbol: str = typer.Argument(...),
-    kind: str = typer.Option("klines", "--kind", help="klines | funding | metrics"),
+    kind: str = typer.Option("klines", "--kind",
+                             help="klines | funding | mark_price | metrics"),
     market: str = typer.Option("um", "--market"),
-    interval: str = typer.Option("1m", "--interval", help="klines only"),
+    interval: str = typer.Option("1m", "--interval", help="klines and mark_price only"),
 ) -> None:
     """Register a dataset and write its DATA-NNNNNN card.
 
@@ -130,6 +227,9 @@ def card(
         console.print(f"[red]unknown kind {kind!r}[/] — one of {', '.join(KINDS)}")
         raise typer.Exit(1)
 
+    if kind == "mark_price":
+        _require_mark_price_interval(interval)
+
     symbol = symbol.upper()
     path = _l1_path(symbol, market, kind, interval)
     if not path.exists():
@@ -138,8 +238,17 @@ def card(
 
     frame = pl.read_parquet(path)
     report = _validate_for(kind, frame, interval)
+    if report.violations:
+        # Before the ID is allocated, before the row is written, before the card exists. A
+        # card is a claim that a dataset may back a trial; registering one the validator
+        # objected to makes that claim without the evidence.
+        for violation in report.violations:
+            console.print(f"[red]VIOLATION[/] {violation}")
+        console.print(f"[red]{path.name} is not fit to register[/] — rebuild it from L0.")
+        raise typer.Exit(1)
+
     digest = db.sha256_file(path)
-    label = interval if kind == "klines" else kind
+    label = _interval_label(kind, interval)
 
     with db.connect() as conn:
         existing = conn.execute(
@@ -174,6 +283,21 @@ def card(
         f"| {g['from'][:16]} | {g['to'][:16]} | {g['missing_bars']} | |" for g in top_gaps
     ) or "| — | — | 0 | none |"
     notes = "\n".join(f"- **{k}**: `{v}`" for k, v in report.notes.items()) or "- none"
+    # Read off the built frame, never typed. A schema section that disagrees with the file
+    # is worse than no schema section.
+    schema_table = "\n".join(
+        f"| `{name}` | `{dtype}` |" for name, dtype in frame.schema.items())
+    semantics = SEMANTICS.get(kind, "")
+    # A complete command, from the dataset's own coverage. "--start ..." is not a
+    # reproducible instruction, and the sentence under it claimed it was.
+    command, grain = REBUILD[kind]
+    span = 7 if grain == "month" else 10
+    rebuild = " ".join([
+        "uv run supercortex data", command, symbol,
+        f"--start {report.start[:span]}", f"--end {report.end[:span]}",
+        f"--market {market}",
+        *([f"--interval {interval}"] if "{interval}" in KINDS[kind][1] else []),
+    ])
 
     card_path.write_text(
         f"""---
@@ -214,6 +338,12 @@ checksums. Public data only; no credentials involved.
 | Non-monotonic | {report.non_monotonic} |
 | SHA256 | `{digest}` |
 
+## Schema
+
+| Column | Type |
+|---|---|
+{schema_table}
+{semantics}
 ## Notes
 
 {notes}
@@ -231,7 +361,7 @@ this dataset backs a promoted strategy.
 ## Rebuild
 
 ```
-supercortex data build{'' if kind == 'klines' else '-' + kind} {symbol} --start ... --end ...
+{rebuild}
 ```
 
 L1 is rebuildable from L0 by that command alone. If it stops reproducing this file, treat
@@ -362,6 +492,68 @@ def _report_table(report: canonical.QualityReport, path: Path) -> Table:
     return table
 
 
+@app.command("fetch-mark-price")
+def fetch_mark_price(
+    symbol: str = typer.Argument(..., help="e.g. BTCUSDT"),
+    start: str = typer.Option(..., "--start", help="YYYY-MM"),
+    end: str = typer.Option(..., "--end", help="YYYY-MM"),
+    market: str = typer.Option("um", "--market"),
+    interval: str = typer.Option("1m", "--interval"),
+) -> None:
+    """Download monthly mark-price kline archives into L0. Checksum-verified."""
+    _require_mark_price_interval(interval)
+    symbol = symbol.upper()
+    periods = sources.months(_parse_month(start), _parse_month(end))
+    got, missing, failed = 0, [], []
+    with console.status(f"fetching {symbol} mark price {interval}…") as status:
+        for period in periods:
+            archive = sources.Archive(
+                market, symbol, SOURCE_KIND["mark_price"], period, interval)
+            status.update(f"{symbol} {period:%Y-%m}  ({got}/{len(periods)})")
+            try:
+                sources.fetch(archive)
+                got += 1
+            except sources.NotPublished:
+                missing.append(f"{period:%Y-%m}")
+            except Exception as exc:
+                failed.append(f"{period:%Y-%m}: {exc}")
+
+    console.print(f"[green]{got}[/] mark-price archives in L0  ({db.free_gb():.1f} GB free)")
+    for line in failed:
+        console.print(f"[red]failed[/] {line}")
+    if missing:
+        console.print(f"[red]not published[/]: {', '.join(missing)}")
+    if missing or failed:
+        # A partial fetch must not look successful. The next build refuses anyway, but
+        # only after the operator has been told L0 is complete.
+        console.print(f"[red]{len(missing) + len(failed)} of {len(periods)} archives did "
+                      f"not arrive[/] — L0 is incomplete and a build will refuse it.")
+        raise typer.Exit(1)
+
+
+@app.command("build-mark-price")
+def build_mark_price(
+    symbol: str = typer.Argument(...),
+    start: str = typer.Option(..., "--start"),
+    end: str = typer.Option(..., "--end"),
+    market: str = typer.Option("um", "--market"),
+    interval: str = typer.Option("1m", "--interval"),
+) -> None:
+    """L0 → L1 for mark-price klines.
+
+    Stores what the venue publishes. No alignment to a funding settlement happens here or
+    anywhere else in this slice.
+    """
+    _require_mark_price_interval(interval)
+    symbol = symbol.upper()
+    archives = [
+        sources.Archive(market, symbol, SOURCE_KIND["mark_price"], p, interval)
+        for p in sources.months(_parse_month(start), _parse_month(end))
+    ]
+    out = _l1_path(symbol, market, "mark_price", interval)
+    _built(archives, canonical.read_mark_price, canonical.validate_mark_price, out)
+
+
 @app.command("build-funding")
 def build_funding(
     symbol: str = typer.Argument(...),
@@ -376,15 +568,7 @@ def build_funding(
         for p in sources.months(_parse_month(start), _parse_month(end))
     ]
     out = canonical.CATALOG_ROOT / "funding_rate" / f"{symbol}.{market}" / "funding.parquet"
-    path, report = canonical.build_generic(
-        archives, canonical.read_funding, canonical.validate_funding, out
-    )
-    console.print(_report_table(report, path))
-    if report.violations:
-        for violation in report.violations:
-            console.print(f"[red]VIOLATION[/] {violation}")
-        raise typer.Exit(1)
-    console.print(f"[green]L1 written[/] {path.relative_to(db.PROJECT_ROOT)}")
+    _built(archives, canonical.read_funding, canonical.validate_funding, out)
 
 
 @app.command("build-metrics")
@@ -401,12 +585,4 @@ def build_metrics(
         for d in sources.days(_parse_day(start), _parse_day(end))
     ]
     out = canonical.CATALOG_ROOT / "metrics" / f"{symbol}.{market}" / "metrics.parquet"
-    path, report = canonical.build_generic(
-        archives, canonical.read_metrics, canonical.validate_metrics, out
-    )
-    console.print(_report_table(report, path))
-    if report.violations:
-        for violation in report.violations:
-            console.print(f"[red]VIOLATION[/] {violation}")
-        raise typer.Exit(1)
-    console.print(f"[green]L1 written[/] {path.relative_to(db.PROJECT_ROOT)}")
+    _built(archives, canonical.read_metrics, canonical.validate_metrics, out)

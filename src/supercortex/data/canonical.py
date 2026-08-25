@@ -340,6 +340,142 @@ def validate_funding(frame: pl.DataFrame) -> QualityReport:
     return report
 
 
+# ── mark-price klines ───────────────────────────────────────────────────────────
+# The venue publishes the mark-price series in the same twelve-field envelope as a traded
+# kline, and its documentation lists fields 6 and 8-12 as **Ignore**. They are named
+# `ignore_*` here for exactly that reason: calling field 6 `volume` and field 9 `trades`
+# would assert semantics Binance explicitly withholds, on a series that has neither, and a
+# column named `volume` is a number somebody eventually believes.
+MARK_PRICE_RAW_COLUMNS = [
+    "open_time", "open", "high", "low", "close",
+    "ignore_1", "close_time", "ignore_2", "ignore_3", "ignore_4", "ignore_5", "ignore_6",
+]
+
+#: What L1 keeps. Only the documented, meaningful fields survive.
+MARK_PRICE_COLUMNS = ["ts_ms", "open", "high", "low", "close", "ts"]
+
+MARK_PRICE_STEP_MS = 60_000
+
+
+def read_mark_price(archive: Archive) -> pl.DataFrame:
+    """Read one monthly mark-price kline archive into a typed frame.
+
+    Deliberately NOT `read_klines`. The envelopes are identical and the meanings are not:
+    a traded kline's volume, quote volume, trade count and taker splits are real
+    quantities, and on a mark-price series the venue publishes zeros and Ignore in those
+    positions. Sharing the parser would carry those names into L1.
+
+    This function stores what Binance publishes. It makes no claim that `open` is the mark
+    price used to settle a funding payment - see the dataset card.
+    """
+    with zipfile.ZipFile(archive.local) as zf:
+        names = [n for n in zf.namelist() if n.endswith(".csv")]
+        if len(names) != 1:
+            raise ValueError(f"{archive.stem}: expected 1 csv, found {len(names)}")
+        raw = zf.read(names[0])
+
+    first = raw.split(b"\n", 1)[0].decode("utf-8", "replace")
+    has_header = "open_time" in first.lower()
+
+    # Width is checked BEFORE names are applied. Handing polars a twelve-name list for a
+    # six-column frame raises a ShapeError from inside the reader, which names neither the
+    # archive nor the expectation - and an archive whose shape changed is precisely the
+    # thing this reader must report clearly rather than coerce.
+    frame = pl.read_csv(raw, has_header=has_header, truncate_ragged_lines=False)
+    if frame.width != len(MARK_PRICE_RAW_COLUMNS):
+        raise ValueError(
+            f"{archive.stem}: expected {len(MARK_PRICE_RAW_COLUMNS)} columns, "
+            f"got {frame.width}"
+        )
+    frame = frame.rename(dict(zip(frame.columns, MARK_PRICE_RAW_COLUMNS, strict=True)))
+
+    return (
+        frame.select(
+            _to_millis(pl.col("open_time")).alias("ts_ms"),
+            # Cast rather than override on read: a month whose prices are all integral
+            # (`43158`) infers as Int64, and a column that is Float64 in one month and
+            # Int64 in the next cannot be concatenated with the rest.
+            pl.col("open").cast(pl.Float64), pl.col("high").cast(pl.Float64),
+            pl.col("low").cast(pl.Float64), pl.col("close").cast(pl.Float64),
+        )
+        .with_columns(
+            pl.from_epoch(pl.col("ts_ms"), time_unit="ms")
+            .dt.replace_time_zone("UTC").alias("ts")
+        )
+        .sort("ts_ms")
+    )
+
+
+def validate_mark_price(frame: pl.DataFrame) -> QualityReport:
+    """What we know about a mark-price series, stated so it can be argued with.
+
+    The archive is published on an exact one-minute grid, so an off-grid timestamp is not
+    jitter to absorb - it means the reader was bypassed or the archive changed shape.
+    Nothing here fills a gap: a missing minute is inventoried and stays missing.
+    """
+    violations: list[str] = []
+    if frame.height == 0:
+        return QualityReport(0, "", "", 0, violations=["empty dataset"])
+
+    prices = ("open", "high", "low", "close")
+    required = ("ts_ms", *prices)
+    empty = [name for name in required if frame[name].null_count()]
+    if empty:
+        violations.append(f"null values in required fields: {', '.join(empty)}")
+
+    ts = frame["ts_ms"]
+    duplicates = frame.height - ts.n_unique()
+    non_monotonic = int((ts.diff().drop_nulls() <= 0).sum())
+    if duplicates:
+        violations.append(f"{duplicates} duplicate timestamps")
+    if non_monotonic:
+        violations.append(f"{non_monotonic} non-monotonic timestamps")
+
+    off_grid_stamps = frame.filter(pl.col("ts_ms") % MARK_PRICE_STEP_MS != 0).height
+    if off_grid_stamps:
+        violations.append(
+            f"{off_grid_stamps} timestamps are not on the one-minute grid")
+
+    non_finite = frame.filter(
+        pl.any_horizontal(
+            (pl.col(c).is_not_null() & (pl.col(c).is_nan() | pl.col(c).is_infinite()))
+            for c in prices
+        )
+    ).height
+    if non_finite:
+        violations.append(f"{non_finite} rows carry a non-finite price")
+
+    non_positive = frame.filter(
+        pl.any_horizontal((pl.col(c).is_not_null() & (pl.col(c) <= 0)) for c in prices)
+    ).height
+    if non_positive:
+        violations.append(f"{non_positive} rows carry a non-positive price")
+
+    bad_ohlc = frame.filter(
+        (pl.col("high") < pl.col("low"))
+        | (pl.col("high") < pl.col("open")) | (pl.col("high") < pl.col("close"))
+        | (pl.col("low") > pl.col("open")) | (pl.col("low") > pl.col("close"))
+    ).height
+    if bad_ohlc:
+        violations.append(f"{bad_ohlc} bars violate low <= open/close <= high")
+
+    gaps, off_grid = _gap_scan(frame, MARK_PRICE_STEP_MS)
+    low, high = _epoch_bounds(ts)
+    expected = (high - low) // MARK_PRICE_STEP_MS + 1
+
+    return QualityReport(
+        rows=frame.height,
+        start=datetime.fromtimestamp(low / 1000, UTC).isoformat(),
+        end=datetime.fromtimestamp(high / 1000, UTC).isoformat(),
+        expected_rows=expected,
+        gaps=gaps,
+        duplicates=duplicates,
+        non_monotonic=non_monotonic,
+        violations=violations,
+        notes={"off_grid": off_grid} if off_grid else {},
+    )
+
+
 # ── metrics: open interest and crowding ratios ──────────────────────────────────
 METRICS_COLUMNS = [
     "create_time", "symbol", "sum_open_interest", "sum_open_interest_value",
@@ -435,18 +571,77 @@ def validate_metrics(frame: pl.DataFrame) -> QualityReport:
     )
 
 
+class BuildRefused(RuntimeError):
+    """L1 was not written, and the existing one was not touched.
+
+    Carries the report when one exists, so the caller can show what the validator found
+    rather than only that it objected.
+    """
+
+    def __init__(self, message: str, report: QualityReport | None = None) -> None:
+        super().__init__(message)
+        self.report = report
+
+
 def build_generic(
     archives: list[Archive],
     reader: Callable[[Archive], pl.DataFrame],
     validator: Callable[[pl.DataFrame], QualityReport],
     out: Path,
 ) -> tuple[Path, QualityReport]:
-    """Concatenate L0 archives into one validated L1 Parquet file."""
-    frames = [reader(a) for a in archives if a.local.exists()]
-    if not frames:
-        raise RuntimeError("no L0 archives present — run `supercortex data fetch` first")
-    combined = pl.concat(frames).unique(subset=["ts_ms"], keep="first").sort("ts_ms")
+    """Concatenate the requested L0 archives into one validated L1 Parquet file.
+
+    Three things this function must not do, each of which it used to:
+
+    * **Deduplicate.** `unique(subset=["ts_ms"])` erased exactly the defect the validators
+      exist to find, and it chose which of two rows claiming the same instant to keep - a
+      decision nobody made and nobody could see. Every row read is a row validated.
+    * **Build from whatever happened to be on disk.** Skipping absent archives measures
+      completeness between the observed first and last row, so a truncated window reports
+      as complete. The requested span is what was asked for.
+    * **Write before validating.** The canonical file was replaced and only then checked,
+      so a refused build left the invalid result in place of the good one.
+    """
+    if not archives:
+        raise BuildRefused(
+            "no archives requested, so there is nothing to build and no span to check"
+        )
+
+    missing = [a for a in archives if not a.local.exists()]
+    if missing:
+        raise BuildRefused(
+            f"{len(missing)} of {len(archives)} requested archives are not in L0: "
+            f"{', '.join(a.stem for a in missing)}. Fetch them first — a build that "
+            f"silently skips a month reports the months it did read as complete."
+        )
+
+    frames = []
+    for archive in archives:
+        try:
+            frames.append(reader(archive))
+        except Exception as exc:
+            raise BuildRefused(
+                f"{archive.stem} is present but could not be read: {exc}"
+            ) from exc
+
+    # No dedup: two rows claiming one instant both reach the validator. The sort is stable
+    # so that a report cannot depend on an arbitrary tie order — belt and braces rather
+    # than a load-bearing guarantee, since a frame carrying ties is refused before
+    # anything is persisted, and no test can observe the difference.
+    combined = pl.concat(frames).sort("ts_ms", maintain_order=True)
     report = validator(combined)
+
     out.parent.mkdir(parents=True, exist_ok=True)
-    combined.write_parquet(out, compression="zstd", statistics=True)
+    staged = out.with_name(out.name + ".building")
+    try:
+        combined.write_parquet(staged, compression="zstd", statistics=True)
+        if report.violations:
+            raise BuildRefused(
+                f"{out.name} was not written: {'; '.join(report.violations)}", report
+            )
+        # Same directory, so this is an atomic rename rather than a copy: either the old
+        # L1 is intact or the new one is complete, never a half-written file.
+        staged.replace(out)
+    finally:
+        staged.unlink(missing_ok=True)
     return out, report
