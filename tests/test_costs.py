@@ -5,13 +5,19 @@ profitable, survive falsification, and reach live capital. Coverage target is 90
 """
 from __future__ import annotations
 
+import ast
+import dataclasses
+import inspect
 import math
+import textwrap
 from dataclasses import replace
 
 import pytest
 
 from supercortex.costs.model import (
+    CostedResult,
     CostModel,
+    ProfitFactorState,
     TaxRegime,
     Trade,
     apply,
@@ -350,3 +356,98 @@ def test_realised_tax_rate_on_a_profitable_year():
     assert result.net_of_costs > 0
     assert result.realised_tax_rate > CostModel().effective_tax_rate
     assert math.isfinite(result.realised_tax_rate)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# the empty result, constructed by name
+# ══════════════════════════════════════════════════════════════════════════════
+# `apply([])` built its CostedResult from 22 positional arguments. Every one was a bare
+# `0.0` in a run of sixteen, so a field inserted, removed or reordered in the dataclass
+# would shift the rest silently and still type-check. These tests pin the value of every
+# field so the construction can be rewritten by name without changing a single number.
+EMPTY_ZEROS = (
+    "turnover", "gross_pnl", "execution_costs", "funding_pnl", "net_of_costs",
+    "tds_withheld", "tds_credited", "tds_unrecovered", "tds_carry_cost", "net_of_tds",
+    "tax_total", "tax_payable", "net_after_tax", "gross_wins", "gross_losses",
+    "profit_factor_gross", "profit_factor_net", "net_wins", "net_losses",
+)
+
+
+@pytest.mark.parametrize("model", [
+    CostModel(),
+    CostModel(regime=TaxRegime.BUSINESS_INCOME),
+    CostModel(regime=TaxRegime.VDA_NO_TDS, taker_fee_bps=9.0, slippage_bps=7.0),
+])
+def test_an_empty_result_carries_the_model_it_was_built_from(model):
+    result = apply([], model)
+    assert result.regime is model.regime
+    assert result.cost_model_version == model.version
+    assert result.break_even_profit_factor == model.break_even_profit_factor
+
+
+@pytest.mark.parametrize("field", EMPTY_ZEROS)
+def test_every_numeric_field_of_an_empty_result_is_zero(field):
+    assert getattr(apply([], CostModel()), field) == 0.0
+
+
+def test_the_empty_result_has_no_trades_and_no_wins():
+    result = apply([], CostModel())
+    assert result.n_trades == 0
+    assert result.n_wins == 0
+    assert result.win_rate == 0.0
+
+
+def test_the_empty_result_is_undefined_and_clears_nothing():
+    result = apply([], CostModel())
+    assert result.profit_factor_gross_state is ProfitFactorState.UNDEFINED
+    assert result.profit_factor_net_state is ProfitFactorState.UNDEFINED
+    assert result.clears_break_even is False
+
+
+def test_every_declared_field_of_an_empty_result_is_pinned_by_these_tests():
+    """A field added to CostedResult without a value here is a gap in this regression."""
+    covered = set(EMPTY_ZEROS) | {
+        "regime", "cost_model_version", "break_even_profit_factor", "n_trades", "n_wins",
+    }
+    declared = {f.name for f in dataclasses.fields(apply([], CostModel()))}
+    assert declared == covered, declared ^ covered
+
+
+def _empty_branch_construction() -> ast.Call:
+    """The `CostedResult(...)` call inside `if not trades:`, as a syntax node.
+
+    Read structurally rather than as text: a substring search for `regime=` passes on a
+    call that also has twenty positional arguments, which is the exact defect this test
+    exists to prevent.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(apply)))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+                and isinstance(test.operand, ast.Name)
+                and test.operand.id == "trades"):
+            continue
+        for inner in ast.walk(node):
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                    and inner.func.id == "CostedResult"):
+                return inner
+    raise AssertionError("no CostedResult(...) call found in the `if not trades:` branch")
+
+
+def test_the_empty_result_takes_no_positional_arguments():
+    """Twenty-two positional arguments, sixteen of them a bare `0.0`, meant a field
+    inserted or reordered in CostedResult shifted every value after it - silently, and
+    still type-checking."""
+    call = _empty_branch_construction()
+    assert call.args == [], f"{len(call.args)} positional argument(s) reintroduced"
+    assert not any(keyword.arg is None for keyword in call.keywords), \
+        "**kwargs unpacking hides which fields are set"
+
+
+def test_the_empty_result_names_every_declared_field():
+    call = _empty_branch_construction()
+    passed = {keyword.arg for keyword in call.keywords}
+    declared = {f.name for f in dataclasses.fields(CostedResult)}
+    assert passed == declared, f"missing {declared - passed}, unknown {passed - declared}"

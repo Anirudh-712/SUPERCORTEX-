@@ -285,8 +285,11 @@ class CostedResult:
     profit_factor_gross: float
     profit_factor_net: float
     break_even_profit_factor: float
-    #: Defaulted so the zero-trade construction below stays positional. Zero wins and zero
-    #: losses is exactly the UNDEFINED state, so the defaults are the correct answer.
+    #: Net wins and losses, defaulted to zero because zero of each is a real answer, not
+    #: a missing one: it is exactly the UNDEFINED profit-factor state, where the ratio is
+    #: 0/0 and no value exists. A result built without them is therefore correct by
+    #: construction rather than merely convenient - `profit_factor_net_state` reads them
+    #: and reports UNDEFINED, and `clears_break_even` refuses on that basis.
     net_wins: float = 0.0
     net_losses: float = 0.0
 
@@ -372,11 +375,35 @@ def apply(trades: list[Trade], model: CostModel) -> CostedResult:
       job of reducing the bill.
     """
     if not trades:
+        # Named, not positional. Sixteen consecutive `0.0` in declaration order meant a
+        # field inserted or reordered in CostedResult would shift the rest silently and
+        # still type-check; the only thing that would have noticed is a number nobody
+        # reads until it is in a report.
         return CostedResult(
-            model.regime, model.version, 0, 0.0,
-            0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0, 0.0, 0.0, model.break_even_profit_factor,
+            regime=model.regime,
+            cost_model_version=model.version,
+            n_trades=0,
+            turnover=0.0,
+            gross_pnl=0.0,
+            execution_costs=0.0,
+            funding_pnl=0.0,
+            net_of_costs=0.0,
+            tds_withheld=0.0,
+            tds_credited=0.0,
+            tds_unrecovered=0.0,
+            tds_carry_cost=0.0,
+            net_of_tds=0.0,
+            tax_total=0.0,
+            tax_payable=0.0,
+            net_after_tax=0.0,
+            gross_wins=0.0,
+            gross_losses=0.0,
+            n_wins=0,
+            profit_factor_gross=0.0,
+            profit_factor_net=0.0,
+            break_even_profit_factor=model.break_even_profit_factor,
+            net_wins=0.0,
+            net_losses=0.0,
         )
 
     gross = sum(t.gross_pnl for t in trades)
