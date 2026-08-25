@@ -1,6 +1,7 @@
 """Experiment and trial lifecycle. Law 2 lives here."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -175,6 +176,7 @@ def close_trial(
         raise ValueError(f"invalid outcome {outcome!r}")
 
     metrics_path: Path | None = None
+    artifact_sha256: str | None = None
     if metrics is not None:
         with connect() as conn:
             slug = conn.execute(
@@ -183,22 +185,26 @@ def close_trial(
         artifacts = EXPERIMENTS_DIR / f"{experiment_id}-{slug}" / "artifacts"
         artifacts.mkdir(parents=True, exist_ok=True)
         payload = dump_metrics(metrics)
+        # The digest covers the bytes that land on disk, not a re-serialisation of the
+        # dict: the file is what a later reader authenticates.
+        encoded = payload.encode("utf-8")
+        artifact_sha256 = hashlib.sha256(encoded).hexdigest()
         metrics_path = artifacts / f"metrics-trial-{seq:04d}.json"
-        metrics_path.write_text(payload, encoding="utf-8")
+        metrics_path.write_bytes(encoded)
         # metrics.json is the DESIGNATED result, not merely the most recent one. A
         # diagnostic probe deliberately corrupts its own inputs, so letting it overwrite
         # the headline would leave the experiment reporting a number produced by a run
         # that was never meant to be believed.
         if is_headline:
-            (artifacts / "metrics.json").write_text(payload, encoding="utf-8")
+            (artifacts / "metrics.json").write_bytes(encoded)
 
     with connect() as conn:
         conn.execute(
-            "UPDATE trial SET finished_at = ?, outcome = ?, metrics_path = ?"
-            " WHERE experiment_id = ? AND seq = ?",
+            "UPDATE trial SET finished_at = ?, outcome = ?, metrics_path = ?,"
+            " artifact_sha256 = ? WHERE experiment_id = ? AND seq = ?",
             (now(), outcome,
              metrics_path.relative_to(PROJECT_ROOT).as_posix() if metrics_path else None,
-             experiment_id, seq),
+             artifact_sha256, experiment_id, seq),
         )
     return metrics_path
 

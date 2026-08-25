@@ -36,7 +36,7 @@ NS = 1_000_000
 def test_encoding_is_declared_and_versioned():
     """The digest is worthless unless the encoding that produced it is named."""
     assert evidence.SERIES_ENCODING == "scx-series-1"
-    assert evidence.SCHEMA_VERSION == 1
+    assert evidence.SCHEMA_VERSION == 2
 
 
 def test_series_digest_is_big_endian_struct_over_ts_and_close():
@@ -248,6 +248,7 @@ def _block(**over):
     trades = over.pop("trades", [_trade(0, 10, 100.0, 101.0), _trade(20, 30, 100.0, 99.0)])
     kwargs = dict(
         identity=IDENTITY, trades=trades, model=model, run_config=RUN_CONFIG,
+        funding_series=dict(FUNDING),
         price_series=evidence.price_series_evidence(
             facts=evidence.series_facts(_bars()), source=evidence.SOURCE_REGISTERED,
             dataset_ids=["DATA-000002"], data_snapshot="snap",
@@ -368,8 +369,12 @@ from supercortex.registry import db, experiments  # noqa: E402
 SERIES = {"source": evidence.SOURCE_REGISTERED, "encoding": evidence.SERIES_ENCODING,
           "series_sha256": "d" * 64, "n_points": 3,
           "first_ts_event_ns": 1, "last_ts_event_ns": 3}
-DIAGNOSTICS = {"series": SERIES, "bars": 3, "engine_realized_pnl": 1.0,
-               "our_gross_pnl": 1.0, "reconciliation_diff": 0.0}
+FUNDING = {"source": evidence.FUNDING_NONE, "encoding": evidence.FUNDING_ENCODING,
+           "funding_sha256": None, "n_events": 0,
+           "first_ts_event_ns": None, "last_ts_event_ns": None}
+DIAGNOSTICS = {"series": SERIES, "funding_series": FUNDING, "bars": 3,
+               "engine_realized_pnl": 1.0, "our_gross_pnl": 1.0,
+               "reconciliation_diff": 0.0}
 
 
 def _spec(**over) -> BacktestSpec:
@@ -398,7 +403,16 @@ def test_a_run_that_reported_no_series_cannot_produce_evidence():
     with pytest.raises(evidence.EvidenceError, match="series"):
         trial_mod._falsification_input(
             _spec(), CostModel(), [], IDENTITY | {"dataset_ids": []},
-            {"bars": 0},
+            {"bars": 0, "funding_series": dict(FUNDING)},
+        )
+
+
+def test_a_run_that_reported_no_funding_evidence_cannot_produce_it():
+    """A run with no funding must SAY so; absence is not a statement."""
+    with pytest.raises(evidence.EvidenceError, match="funding"):
+        trial_mod._falsification_input(
+            _spec(), CostModel(), [], IDENTITY | {"dataset_ids": []},
+            {"bars": 0, "series": SERIES},
         )
 
 
@@ -937,3 +951,59 @@ def test_a_seal_failure_when_the_registry_is_also_gone_reports_both(tmp_registry
     joined = " | ".join(_chain(caught.value))
     assert "registry unavailable (ok)" in joined
     assert "registry unavailable (error)" in joined
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# the funding stream is evidence too
+# ══════════════════════════════════════════════════════════════════════════════
+# The price digest covers bars alone. A probe that shifts or scrambles funding changes what
+# the strategy saw and leaves the bar digest untouched, so `funding_shift` could be edited
+# after sealing and every check still agreed.
+def test_funding_encoding_is_declared_and_distinct():
+    assert evidence.FUNDING_ENCODING == "scx-funding-1"
+    assert evidence.FUNDING_ENCODING != evidence.SERIES_ENCODING
+
+
+def test_a_funding_digest_never_collides_with_a_price_digest():
+    """Same pairs, different stream. The prefix keeps them apart."""
+    pairs = [(1, 0.0001), (2, -0.0002)]
+    assert evidence.funding_digest(pairs) != evidence.series_digest(pairs)
+
+
+def test_funding_digest_is_order_and_value_sensitive():
+    base = [(1_000, 0.0001), (2_000, 0.0002)]
+    assert evidence.funding_digest(base) != evidence.funding_digest(list(reversed(base)))
+    assert evidence.funding_digest(base) != evidence.funding_digest(
+        [(1_000, 0.0001), (2_000, 0.00020001)])
+    assert evidence.funding_digest(base) != evidence.funding_digest(
+        [(1_001, 0.0001), (2_000, 0.0002)])
+
+
+def test_an_empty_funding_stream_has_facts_that_say_so():
+    """A synthetic run supplies no funding. That is a statement, not an absence."""
+    facts = evidence.funding_facts([])
+    assert facts["source"] == evidence.FUNDING_NONE
+    assert facts["n_events"] == 0
+    assert facts["funding_sha256"] is None
+
+
+def test_a_supplied_funding_stream_is_summarised():
+    facts = evidence.funding_facts([(1_000, 0.0001), (2_000, 0.0002)])
+    assert facts["source"] == evidence.FUNDING_SUPPLIED
+    assert facts["n_events"] == 2
+    assert facts["first_ts_event_ns"] == 1_000
+    assert facts["last_ts_event_ns"] == 2_000
+    assert facts["funding_sha256"] == evidence.funding_digest(
+        [(1_000, 0.0001), (2_000, 0.0002)])
+    assert facts["encoding"] == evidence.FUNDING_ENCODING
+
+
+@pytest.mark.parametrize("bad", [[(1.5, 0.1)], [(1, "0.1")], [(1, float("nan"))]])
+def test_funding_digest_refuses_what_it_cannot_encode(bad):
+    with pytest.raises(evidence.EvidenceError):
+        evidence.funding_digest(bad)
+
+
+def test_the_schema_version_moved_for_the_funding_block():
+    """Adding required evidence changes the shape, so the version changes with it."""
+    assert evidence.SCHEMA_VERSION == 2

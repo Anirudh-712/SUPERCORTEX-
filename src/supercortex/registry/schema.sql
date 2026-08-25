@@ -49,6 +49,10 @@ CREATE TABLE IF NOT EXISTS trial (
     finished_at        TEXT,
     outcome            TEXT,            -- ok | error | abandoned  (all three count)
     metrics_path       TEXT,
+    -- sha256 of the exact bytes written to metrics_path. Without it the artifact is a
+    -- mutable document that merely claims to be the sealed result: every internal
+    -- cross-check can be edited into agreement by whoever holds the file.
+    artifact_sha256    TEXT,
     agent_id           TEXT,
     note               TEXT,
     UNIQUE (experiment_id, seq),

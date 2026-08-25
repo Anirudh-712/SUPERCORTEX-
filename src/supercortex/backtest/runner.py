@@ -145,11 +145,26 @@ def fee_free_instrument() -> CryptoPerpetual:
     )
 
 
+#: How each supported interval is spelled in a Nautilus bar-type specification.
+BAR_AGGREGATION = {"1m": "1-MINUTE", "1h": "1-HOUR", "4h": "4-HOUR", "1d": "1-DAY"}
+
+
+def bar_type_for(instrument: Any, interval: str) -> Any:
+    """The bar type for one interval. Stated once, and used by both the producer and the
+    verifier with the *recorded* interval.
+
+    This was hardcoded to `1-HOUR`, so a 1-minute or 4-hour run told the engine its bars
+    were hourly. Freezing that into the verifier would have made reconstruction agree with
+    the producer about the wrong thing.
+    """
+    return BarType.from_str(f"{instrument.id}-{BAR_AGGREGATION[interval]}-LAST-EXTERNAL")
+
+
 def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
     """Execute the backtest and return closed round trips plus engine diagnostics."""
     instrument = fee_free_instrument()
     venue = Venue("BINANCE")
-    bar_type = BarType.from_str(f"{instrument.id}-1-HOUR-LAST-EXTERNAL")
+    bar_type = bar_type_for(instrument, spec.interval)
 
     engine = BacktestEngine(
         config=BacktestEngineConfig(
@@ -212,6 +227,12 @@ def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
             funding = [f for f in funding if f.ts_event <= spec.end_ms * MS_TO_NS]
         engine.add_data(funding)
 
+    # Same rule as the bars: hash what the engine received, after shift, scramble and the
+    # window filter. A synthetic run supplies nothing, and the facts say so explicitly
+    # rather than leaving the absence to be inferred.
+    funding_evidence = evidence.funding_facts(
+        [(int(event.ts_event), float(event.rate)) for event in funding])
+
     strategy_cls, config_cls = resolve_strategy(spec.strategy)
     engine.add_strategy(
         strategy_cls(
@@ -239,6 +260,7 @@ def run(spec: BacktestSpec) -> tuple[list[Trade], dict[str, Any]]:
                        else evidence.SOURCE_REGISTERED),
             **series,
         },
+        "funding_series": funding_evidence,
         "bars": len(bars),
         "funding_events": len(funding),
         "positions_rows": 0 if positions is None else len(positions),

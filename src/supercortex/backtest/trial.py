@@ -42,6 +42,26 @@ def load_config(experiment_id: str) -> tuple[Path, dict[str, Any]]:
     return path, yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
+def model_from_config(config: dict[str, Any]) -> CostModel:
+    """The effective cost model a config implies. One definition, so the verifier derives
+    exactly what the producer built rather than re-stating its defaults."""
+    return CostModel(**dict(config.get("cost_model") or {}))
+
+
+def run_values_from_config(config: dict[str, Any]) -> dict[str, Any]:
+    """The effective run contract a config implies, with the producer's own defaults."""
+    data = config.get("data") or {}
+    return {
+        "starting_balance": float(config.get("starting_balance", 100_000.0)),
+        "leverage": float(config.get("leverage", 1.0)),
+        "seed": int(config.get("seed", 42)),
+        "latency_ms": int(config.get("latency_ms", 250)),
+        "interval": data.get("interval", "1h"),
+        "symbol": data.get("symbol", "BTCUSDT"),
+        "market": data.get("market", "um"),
+    }
+
+
 def dataset_snapshot(dataset_ids: list[str]) -> str:
     """A hash over the exact datasets this trial reads.
 
@@ -138,8 +158,7 @@ def execute(
     data_cfg = config.get("data") or {}
     snapshot = dataset_snapshot(list(data_cfg.get("datasets") or []))
 
-    cost_cfg = dict(config.get("cost_model") or {})
-    model = CostModel(**cost_cfg)
+    model = model_from_config(config)
 
     # 1. REGISTER — before a single bar is processed.
     seq = experiments.open_trial(
@@ -161,19 +180,14 @@ def execute(
                 f"{experiment_id}: config.yaml declares no `strategy`. The strategy is a "
                 "hashed parameter, not a runner default."
             )
+        run_values = run_values_from_config(config)
         spec = BacktestSpec(
             strategy=strategy_ref,
-            symbol=data_cfg.get("symbol", "BTCUSDT"),
-            market=data_cfg.get("market", "um"),
-            interval=data_cfg.get("interval", "1h"),
             start_ms=data_cfg.get("start_ms"),
             end_ms=data_cfg.get("end_ms"),
-            starting_balance=float(config.get("starting_balance", 100_000.0)),
-            leverage=float(config.get("leverage", 1.0)),
-            latency_ms=int(config.get("latency_ms", 250)),
-            seed=int(config.get("seed", 42)),
             params=config.get("params") or {},
             probe=probe or ProbeSpec(),
+            **run_values,
         )
         trades, diagnostics = run_backtest(spec)
 
@@ -276,6 +290,12 @@ def _falsification_input(
     diagnostics: dict[str, Any],
 ) -> dict[str, Any]:
     """The versioned block a later falsification run reads instead of guessing."""
+    funding_series = diagnostics.get("funding_series")
+    if not isinstance(funding_series, dict):
+        raise evidence.EvidenceError(
+            "the runner returned no funding evidence; a run that supplied no funding must "
+            "say so explicitly rather than leave it absent"
+        )
     series = diagnostics.get("series")
     if not isinstance(series, dict):
         raise evidence.EvidenceError(
@@ -305,6 +325,7 @@ def _falsification_input(
         generator_parameters=synthetic.get("parameters"),
     )
     return evidence.build(
+        funding_series=dict(funding_series),
         identity=identity,
         trades=trades,
         model=model,
@@ -345,7 +366,8 @@ def _metrics(
         "trials_consumed_to_date": trials_to_date,
         "cost_model_version": model.version,
         "regime": conservative.regime.value,
-        "engine": {k: v for k, v in diagnostics.items() if k != "series"},
+        "engine": {k: v for k, v in diagnostics.items()
+                   if k not in ("series", "funding_series")},
         "window": {
             "interval": spec.interval,
             "start_ms": spec.start_ms,

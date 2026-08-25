@@ -47,6 +47,7 @@ def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
 MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("dataset", "kind", "TEXT"),
     ("dataset", "parquet_path", "TEXT"),
+    ("trial", "artifact_sha256", "TEXT"),
 )
 
 

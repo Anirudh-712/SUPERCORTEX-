@@ -31,11 +31,20 @@ from supercortex.costs.model import CostModel, Trade
 
 #: Bump when the shape of the block changes. A reader that does not recognise a version
 #: must refuse the artifact rather than interpret unknown fields.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: The canonical series encoding, named inside every block that uses it. A digest whose
 #: encoding is not recorded is a number nobody can reproduce.
 SERIES_ENCODING = "scx-series-1"
+
+#: The funding stream gets its own encoding tag. Sharing one with the price series would
+#: let two different streams that happen to carry the same pairs hash identically.
+FUNDING_ENCODING = "scx-funding-1"
+
+#: Whether a run was given a funding stream at all. A synthetic fixture is not missing
+#: funding by accident - it deliberately has none, and says so.
+FUNDING_SUPPLIED = "supplied"
+FUNDING_NONE = "none"
 
 SOURCE_REGISTERED = "registered_dataset"
 SOURCE_SYNTHETIC = "synthetic_fixture"
@@ -136,6 +145,61 @@ def series_digest(pairs: object) -> str:
             raise EvidenceError(f"series[{index}] cannot be encoded: {exc}") from exc
 
     return sha256(SERIES_ENCODING.encode("utf-8") + b"\n" + bytes(body)).hexdigest()
+
+
+def _digest(pairs: object, encoding: str, label: str) -> str:
+    """SHA-256 over `(ts_event_ns, value)` pairs under a named encoding.
+
+    Identical byte-level rules to the price digest - big-endian `>qd`, no `repr`, no
+    locale, delivery order significant - with a distinct prefix so a funding stream and a
+    price series can never hash alike.
+    """
+    if not isinstance(pairs, list | tuple):
+        raise EvidenceError(f"{label} is {type(pairs).__name__}, expected a sequence")
+    if not pairs:
+        raise EvidenceError(f"{label} is empty")
+
+    body = bytearray()
+    for index, pair in enumerate(pairs):
+        if not isinstance(pair, list | tuple) or len(pair) != 2:
+            raise EvidenceError(f"{label}[{index}] is not a (ts_event, value) pair")
+        stamp, value = pair
+        if isinstance(stamp, bool) or not isinstance(stamp, int):
+            raise EvidenceError(
+                f"{label}[{index}] timestamp is {type(stamp).__name__}, expected an "
+                f"integer nanosecond stamp"
+            )
+        number = _finite(value, f"{label}[{index}] value")
+        try:
+            body += struct.pack(">qd", stamp, number)
+        except struct.error as exc:
+            raise EvidenceError(f"{label}[{index}] cannot be encoded: {exc}") from exc
+    return sha256(encoding.encode("utf-8") + b"\n" + bytes(body)).hexdigest()
+
+
+def funding_digest(events: object) -> str:
+    """Digest over the funding events actually delivered, after shift and scramble."""
+    return _digest(events, FUNDING_ENCODING, "funding")
+
+
+def funding_facts(events: list[tuple[int, float]]) -> dict[str, Any]:
+    """What the run did about funding, including deliberately doing nothing."""
+    if not events:
+        return {"source": FUNDING_NONE, "encoding": FUNDING_ENCODING,
+                "funding_sha256": None, "n_events": 0,
+                "first_ts_event_ns": None, "last_ts_event_ns": None}
+    return {
+        "source": FUNDING_SUPPLIED,
+        "encoding": FUNDING_ENCODING,
+        "funding_sha256": funding_digest(events),
+        "n_events": len(events),
+        "first_ts_event_ns": int(events[0][0]),
+        "last_ts_event_ns": int(events[-1][0]),
+    }
+
+
+FUNDING_FACT_FIELDS = ("source", "encoding", "funding_sha256", "n_events",
+                       "first_ts_event_ns", "last_ts_event_ns")
 
 
 def series_facts(pairs: list[tuple[int, float]]) -> dict[str, Any]:
@@ -300,6 +364,7 @@ def build(
     model: CostModel,
     run_config: dict[str, Any],
     price_series: dict[str, Any],
+    funding_series: dict[str, Any],
     reconciliation: dict[str, Any],
 ) -> dict[str, Any]:
     """Assemble the `falsification_input` block. Raises rather than emit a partial one."""
@@ -311,6 +376,11 @@ def build(
             f"from where the config was loaded, and dataset_ids from the experiment's "
             f"config — none of them is assembled from the caller's intent."
         )
+
+    missing_facts = [n for n in FUNDING_FACT_FIELDS if n not in funding_series]
+    if missing_facts:
+        raise EvidenceError(
+            f"funding evidence is incomplete, missing: {', '.join(missing_facts)}")
 
     starting_balance = run_config.get("starting_balance")
     if starting_balance is None:
@@ -339,6 +409,7 @@ def build(
             "sharpe_per_trade": sharpe_per_trade(returns),
         },
         "price_series": price_series,
+        "funding_series": funding_series,
         "reconciliation": dict(reconciliation),
     }
     _assert_finite(block, "falsification_input")
