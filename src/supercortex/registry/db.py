@@ -79,6 +79,42 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("falsification", "status", "TEXT"),
 )
 
+#: View definitions this code has superseded, and may therefore rebuild.
+#:
+#: `CREATE VIEW IF NOT EXISTS` never replaces an existing view, so editing `schema.sql`
+#: alone leaves every existing registry holding the old definition — reported as
+#: incompatible, with `init` unable to repair it. Recording the exact superseded text makes
+#: the upgrade repairable while keeping everything else fail-closed: a view that matches a
+#: definition listed here is one this code wrote and has since replaced, and a view that
+#: matches neither the current nor a superseded form is drift somebody introduced
+#: deliberately, which no migration may silently discard.
+#:
+#: Views hold no data, so rebuilding one cannot lose anything.
+SUPERSEDED_VIEWS: dict[str, tuple[str, ...]] = {
+    "experiment_trials": (
+        # Counted the LEFT JOIN's synthetic all-NULL row as an unsealed trial, so an
+        # experiment with no trials reported trials_open = 1.
+        """
+        CREATE VIEW experiment_trials AS
+        SELECT e.id, e.title, e.status, e.trial_budget,
+               COUNT(t.id) AS trials_consumed,
+               SUM(CASE WHEN t.outcome = 'ok' THEN 1 ELSE 0 END) AS trials_ok,
+               SUM(CASE WHEN t.outcome = 'abandoned' THEN 1 ELSE 0 END) AS trials_abandoned,
+               SUM(CASE WHEN t.outcome IS NULL THEN 1 ELSE 0 END) AS trials_open,
+               CASE WHEN COUNT(t.id) > e.trial_budget THEN 1 ELSE 0 END AS over_budget
+        FROM experiment e
+        LEFT JOIN trial t ON t.experiment_id = e.id
+        GROUP BY e.id
+        """,
+    ),
+}
+
+
+def superseded_view(name: str, sql: object) -> bool:
+    """Is `sql` a definition of `name` that this code wrote and has since replaced?"""
+    stored = _normalise(sql)
+    return any(_normalise(old) == stored for old in SUPERSEDED_VIEWS.get(name, ()))
+
 
 def init(path: Path | None = None) -> Path:
     """Create or migrate the registry. The ONLY sanctioned schema-mutation path.
@@ -89,6 +125,15 @@ def init(path: Path | None = None) -> Path:
     """
     target = Path(path or DB_PATH)
     with connect(target, allow_stale=True) as conn:
+        # Drop only a view whose stored text is one this code superseded, then let
+        # `schema.sql` recreate it. Idempotent: a current view matches nothing here and is
+        # left alone, so a fresh database and a migrated one end up identical.
+        for name in SUPERSEDED_VIEWS:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='view' AND name=?", (name,)
+            ).fetchone()
+            if row is not None and superseded_view(name, row["sql"]):
+                conn.execute(f"DROP VIEW {name}")
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         for table, column, decl in MIGRATIONS:
             existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -356,6 +401,9 @@ class SchemaStatus:
     missing_columns: tuple[tuple[str, str], ...] = ()
     missing_indexes: tuple[str, ...] = ()
     missing_triggers: tuple[str, ...] = ()
+    #: Views holding a definition this code superseded. Repairable: `init` drops and
+    #: recreates them from `schema.sql`, and a view holds no data to lose.
+    stale_views: tuple[str, ...] = ()
     #: Differences `init` cannot repair, each a sentence naming what disagrees.
     incompatible: tuple[str, ...] = ()
     unreadable: str | None = None
@@ -379,6 +427,7 @@ class SchemaStatus:
             *(f"{table}.{column}" for table, column in self.missing_columns),
             *(f"index {name}" for name in self.missing_indexes),
             *(f"trigger {name}" for name in self.missing_triggers),
+            *(f"view {name} (superseded definition)" for name in self.stale_views),
         )
 
     def summary(self) -> str:
@@ -422,7 +471,8 @@ class SchemaOutOfDate(RuntimeError):
 
 def _compare_table(name: str, want: ExpectedTable, got: ExpectedTable,
                    missing_columns: list[tuple[str, str]],
-                   incompatible: list[str]) -> None:
+                   incompatible: list[str],
+                   stale_views: list[str]) -> None:
     """One table or view, field by field."""
     if got.kind != want.kind:
         incompatible.append(f"{name} is a {got.kind}, expected a {want.kind}")
@@ -481,7 +531,10 @@ def _compare_table(name: str, want: ExpectedTable, got: ExpectedTable,
             f"{name} UNIQUE/PRIMARY KEY constraints differ from schema.sql: "
             f"{[i[0] for i in got.indexes]} != {[i[0] for i in want.indexes]}")
     if want.kind == "view" and want.sql != got.sql:
-        incompatible.append(f"view {name} is defined differently from schema.sql")
+        if superseded_view(name, got.sql):
+            stale_views.append(name)          # repairable: `init` rebuilds it
+        else:
+            incompatible.append(f"view {name} is defined differently from schema.sql")
 
 
 def schema_status(path: Path | None = None) -> SchemaStatus:
@@ -515,6 +568,7 @@ def schema_status(path: Path | None = None) -> SchemaStatus:
     missing_columns: list[tuple[str, str]] = []
     missing_indexes: list[str] = []
     missing_triggers: list[str] = []
+    stale_views: list[str] = []
     incompatible: list[str] = []
 
     for name, want in expected.tables.items():
@@ -528,7 +582,8 @@ def schema_status(path: Path | None = None) -> SchemaStatus:
             else:
                 missing_tables.append(name)
             continue
-        _compare_table(name, want, got, missing_columns, incompatible)
+        _compare_table(name, want, got, missing_columns, incompatible,
+                       stale_views)
 
     for name, want_object in expected.objects.items():
         got_object = got_objects.get(name)
@@ -560,7 +615,7 @@ def schema_status(path: Path | None = None) -> SchemaStatus:
         path=target, exists=True,
         missing_tables=tuple(missing_tables), missing_columns=tuple(missing_columns),
         missing_indexes=tuple(missing_indexes), missing_triggers=tuple(missing_triggers),
-        incompatible=tuple(incompatible),
+        stale_views=tuple(stale_views), incompatible=tuple(incompatible),
     )
 
 

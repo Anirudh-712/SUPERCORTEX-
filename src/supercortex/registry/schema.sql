@@ -164,7 +164,11 @@ SELECT e.id,
        COUNT(t.id)                                              AS trials_consumed,
        SUM(CASE WHEN t.outcome = 'ok'        THEN 1 ELSE 0 END) AS trials_ok,
        SUM(CASE WHEN t.outcome = 'abandoned' THEN 1 ELSE 0 END) AS trials_abandoned,
-       SUM(CASE WHEN t.outcome IS NULL       THEN 1 ELSE 0 END) AS trials_open,
+       -- `t.id IS NOT NULL` first: the LEFT JOIN gives an experiment with no trials
+       -- one synthetic row whose every `t.*` column is NULL, and counting that as an
+       -- unsealed trial told the operator to reap a trial that never existed.
+       SUM(CASE WHEN t.id IS NOT NULL AND t.outcome IS NULL
+                THEN 1 ELSE 0 END)                              AS trials_open,
        CASE WHEN COUNT(t.id) > e.trial_budget THEN 1 ELSE 0 END AS over_budget
 FROM experiment e
 LEFT JOIN trial t ON t.experiment_id = e.id
