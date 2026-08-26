@@ -3,7 +3,10 @@
 An AI-native quantitative research desk for one person, one Mac Mini.
 Crypto first. Local-first. **Research is autonomous; capital is not.**
 
-- Architecture and rationale: [`ARCHITECTURE-RESEARCH-REPORT.md`](ARCHITECTURE-RESEARCH-REPORT.md)
+- Design study, dated 2026-08-24, written before anything was built:
+  [`ARCHITECTURE-RESEARCH-REPORT.md`](ARCHITECTURE-RESEARCH-REPORT.md). It records the
+  reasoning behind the tool choices. Parts of the layout it sketches are still unbuilt —
+  for what exists today, run `doctor` and `health` below.
 - Operating rules for agents: [`CLAUDE.md`](CLAUDE.md)
 
 ## Quick start
@@ -37,5 +40,5 @@ cannot see that constraint. Run `uv run supercortex costs breakeven`.
 | 1 · Registry + second brain | ✅ registry, CLI, anti-fabrication hook, tests |
 | 2 · Data | ✅ klines, funding, open interest — verified, carded, gap-inventoried |
 | 3 · Cost model | ✅ India VDA model, 3 tax regimes, 100% covered |
-| 4 · Backtest | ⬜ next — Nautilus, first registered trial |
-| 5 · Falsification engine | ⬜ |
+| 4 · Backtest | ✅ Nautilus runner, registered trials sealed with hashed artifacts |
+| 5 · Falsification engine | 🟡 partial — static battery entrypoint exists; dynamic/SPA tests and the first recorded verdict remain |

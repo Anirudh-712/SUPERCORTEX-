@@ -2,8 +2,9 @@
 id: ADR-013
 type: adr
 title: Move the fabricated-number validator from detective to preventive
-status: PROPOSED — not implemented in this commit
+status: ACCEPTED — implemented
 created: 2026-08-24
+implemented_in: 2f77ec0
 supersedes_part_of: none
 tags: [governance, hooks, anti-fabrication]
 ---

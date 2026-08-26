@@ -87,7 +87,7 @@ def init() -> None:
 
 @app.command()
 def health() -> None:
-    """One-screen system health. Written to 00-dashboard/health.md by launchd."""
+    """One-screen system health. Prints to the terminal; nothing is written to disk."""
     free = db.free_gb()
     disk_ok = free >= DISK_FLOOR_GB
     rows = experiments.summary()
