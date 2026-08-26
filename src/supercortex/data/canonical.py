@@ -947,7 +947,7 @@ def stored_facts(path: Path) -> dict[str, object]:
     }
 
 
-def _validate_and_write(
+def write_validated_parquet(
     combined: pl.DataFrame,
     validator: Callable[[pl.DataFrame], QualityReport],
     out: Path,
@@ -958,6 +958,12 @@ def _validate_and_write(
 
     The single implementation of that step. Every kind reaches Parquet through here, which
     is what stops two copies of the same operation drifting apart again.
+
+    Public because it is a boundary other modules in this package legitimately need: a
+    new dataset family that reached for the private name would either couple itself to an
+    underscore or, worse, grow a second atomic-write path that drifts from this one. Its
+    contract is exactly the guarantee callers depend on — a refused build leaves neither
+    `out` nor a staging file behind, and an existing `out` survives untouched.
     """
     report = validator(combined)
     if notes:
@@ -991,6 +997,23 @@ def _validate_and_write(
     finally:
         staged.unlink(missing_ok=True)
     return out, report
+
+
+def _validate_and_write(
+    combined: pl.DataFrame,
+    validator: Callable[[pl.DataFrame], QualityReport],
+    out: Path,
+    notes: dict[str, object] | None = None,
+    facts: dict[str, object] | None = None,
+) -> tuple[Path, QualityReport]:
+    """Compatibility wrapper for the callers in this module. See `write_validated_parquet`.
+
+    Retained deliberately rather than rewritten at every call site: promoting the boundary
+    should not touch the metrics, klines, funding and mark-price paths, because a change
+    that edits four working builders to rename one function is a change that can break
+    them.
+    """
+    return write_validated_parquet(combined, validator, out, notes=notes, facts=facts)
 
 
 def build_generic(

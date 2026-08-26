@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from supercortex.data import canonical, sources
+from supercortex.data import canonical, capture, settlement, sources
 from supercortex.registry import db
 
 app = typer.Typer(no_args_is_help=True, help="Market data: fetch, build, verify.")
@@ -637,3 +637,127 @@ def build_metrics(
     ]
     out = canonical.CATALOG_ROOT / "metrics" / f"{symbol}.{market}" / "metrics.parquet"
     _built_metrics(archives, out)
+
+
+# ── funding settlements (VENUE_API_CAPTURE) ─────────────────────────────────────
+# Two commands, deliberately: importing a page stores one immutable capture and makes no
+# claim about coverage; building combines stored captures into L1. Collapsing them would
+# make every build depend on whatever happened to be captured last.
+
+
+def _parse_bound(value: str | None, flag: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise typer.BadParameter(f"{flag} must be YYYY-MM-DD, got {value!r}") from exc
+
+
+@app.command("import-funding-page")
+def import_funding_page(
+    capture_dir: str = typer.Option(..., "--capture-dir", help="Local capture bundle"),
+    symbol: str = typer.Option(..., "--symbol"),
+    market: str = typer.Option("um", "--market"),
+) -> None:
+    """Store one human-captured funding page in L0. Local paths only; never fetches.
+
+    Takes no URL and no credential: the operator performs the public request and this
+    command admits the bytes. See `supercortex.data.capture` for what the digests do and
+    do not prove.
+    """
+    symbol = symbol.upper()
+    try:
+        bundle = Path(capture_dir)
+        stored = capture.store(
+            bundle, symbol=symbol, market=market, raw_root=sources.RAW_ROOT
+        )
+    except capture.CaptureRefused as refusal:
+        console.print(f"[red]capture refused[/] — {refusal}")
+        raise typer.Exit(1) from refusal
+
+    # Deliberately NOT `admit(bundle)`: once the capture is stored, the stored bytes
+    # are the subject. Re-reading the source would report on a file that is no longer
+    # what this command is responsible for, and would miss staging corruption.
+    facts = capture.verify_stored(stored)
+    table = Table(show_header=False, box=None)
+    table.add_row("stored", str(stored.relative_to(db.PROJECT_ROOT)))
+    table.add_row("body sha256", facts.body_sha256)
+    table.add_row("captured at (local clock)", facts.captured_at_local)
+    table.add_row("server date (venue clock)", facts.server_date or "—")
+    table.add_row("provenance", facts.provenance)
+    table.add_row("mark price corroboration", facts.mark_price_corroboration)
+    console.print(table)
+    console.print(
+        "[yellow]note[/] the digest fixes these bytes as received; it does not "
+        "authenticate the publisher."
+    )
+
+
+@app.command("build-funding-settlement")
+def build_funding_settlement(
+    symbol: str = typer.Option(..., "--symbol"),
+    market: str = typer.Option("um", "--market"),
+    start: str | None = typer.Option(
+        None, "--start", help="YYYY-MM-DD (UTC), inclusive."),
+    end: str | None = typer.Option(
+        None, "--end", help="YYYY-MM-DD (UTC), EXCLUSIVE: the range is start <= t < end."),
+    require_complete: bool = typer.Option(
+        False, "--require-complete",
+        help="Refuse unless the explicit half-open range [--start, --end) is fully "
+             "corroborated by DATA-000003.",
+    ),
+) -> None:
+    """Combine stored funding captures into L1. Reads only local files."""
+    symbol = symbol.upper()
+    root = capture.capture_root(sources.RAW_ROOT, market, symbol)
+    captures = sorted(
+        p for p in root.glob("*") if p.is_dir() and (p / "body.json").is_file()
+    ) if root.exists() else []
+    if not captures:
+        console.print(
+            f"[red]no stored captures[/] for {symbol}.{market} — run "
+            f"`supercortex data import-funding-page` first."
+        )
+        raise typer.Exit(1)
+
+    archive_path = (
+        canonical.CATALOG_ROOT / "funding_rate" / f"{symbol}.{market}" / "funding.parquet"
+    )
+    if not archive_path.exists():
+        console.print(
+            f"[red]DATA-000003 not built[/] at {archive_path.relative_to(db.PROJECT_ROOT)}; "
+            f"corroboration needs it."
+        )
+        raise typer.Exit(1)
+
+    out = (
+        canonical.CATALOG_ROOT / "funding_settlement" / f"{symbol}.{market}"
+        / "funding_settlement.parquet"
+    )
+    try:
+        path, report = settlement.build(
+            captures, symbol=symbol, archive=pl.read_parquet(archive_path), out=out,
+            start=_parse_bound(start, "--start"), end=_parse_bound(end, "--end"),
+            require_complete=require_complete,
+        )
+    except settlement.SettlementRefused as refusal:
+        console.print(f"[red]build refused[/] — {refusal}")
+        raise typer.Exit(1) from refusal
+    except canonical.BuildRefused as refusal:
+        for violation in (refusal.report.violations if refusal.report else []):
+            console.print(f"[red]VIOLATION[/] {violation}")
+        console.print(f"[red]build refused[/] — {refusal}")
+        raise typer.Exit(1) from refusal
+
+    console.print(_report_table(report, path))
+    console.print(f"[green]L1 written[/] {path.relative_to(db.PROJECT_ROOT)}")
+    console.print(
+        f"completeness [bold]{report.notes['completeness']}[/] · provenance "
+        f"[bold]{report.notes['provenance']}[/] · mark-price corroboration "
+        f"[bold]{report.notes['mark_price_corroboration']}[/]"
+    )
+    reasons = report.notes.get("completeness_reasons")
+    if isinstance(reasons, list):
+        for reason in reasons:
+            console.print(f"  [yellow]PARTIAL[/] {reason}")

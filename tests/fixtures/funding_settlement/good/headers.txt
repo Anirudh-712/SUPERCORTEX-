@@ -1,0 +1,24 @@
+HTTP/2 200 
+content-type: application/json;charset=UTF-8
+content-length: 762
+date: Wed, 26 Aug 2026 05:38:17 GMT
+x-xss-protection: 1; mode=block
+server: nginx
+vary: Accept-Encoding
+vary: accept-encoding
+access-control-allow-origin: *
+access-control-allow-methods: GET, POST, PUT, DELETE, OPTIONS
+access-control-allow-credentials: true
+access-control-allow-headers: *,clienttype,Content-Type,lang,x-ui-request-trace,bnc-uuid
+content-security-policy: default-src 'self'
+cache-control: no-cache, no-store, must-revalidate
+expires: 0
+pragma: no-cache
+strict-transport-security: max-age=31536000; includeSubdomains
+x-content-type-options: nosniff
+x-frame-options: SAMEORIGIN
+x-cache: Miss from cloudfront
+via: 1.1 681d969d2497c22ba74ebcd42875c880.cloudfront.net (CloudFront)
+x-amz-cf-pop: HYD57-P4
+x-amz-cf-id: Lbysl4LbH2BDM_WF5p8pDtfKRXeUrgFt4evw76IgfgxPpjNQnnF1bQ==
+

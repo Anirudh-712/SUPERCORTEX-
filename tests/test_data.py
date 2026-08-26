@@ -514,10 +514,10 @@ def test_parquet_identity_is_invariant_to_how_archives_partition_the_rows(
 
 def test_the_rechunk_lives_on_the_shared_boundary_so_every_kind_inherits_it():
     """Funding, metrics, mark price and klines all reach Parquet through
-    `_validate_and_write`. A rechunk in any one binding would give the guarantee to that
+    `write_validated_parquet`. A rechunk in any one binding would give the guarantee to that
     kind and quietly withhold it from the others."""
     import inspect
-    assert ".rechunk()" in inspect.getsource(canonical._validate_and_write)
+    assert ".rechunk()" in inspect.getsource(canonical.write_validated_parquet)
     for other in (canonical.build, canonical.build_generic, canonical.build_metrics,
                   canonical.read_klines, canonical.read_mark_price):
         assert ".rechunk()" not in inspect.getsource(other), other.__name__
@@ -528,7 +528,7 @@ def test_the_rechunk_happens_after_validation_and_before_the_write():
     a frame that may be about to be refused, and the validator's answer must be about the
     rows as read."""
     import inspect
-    source = inspect.getsource(canonical._validate_and_write)
+    source = inspect.getsource(canonical.write_validated_parquet)
     validate_at = source.index("report = validator(")
     rechunk_at = source.index(".rechunk()")
     write_at = source.index("write_parquet(")
@@ -752,7 +752,7 @@ def test_the_metrics_build_does_not_copy_the_staging_and_write_logic():
     for copied in ("write_parquet", ".building", "staged.replace"):
         assert copied not in metrics_src, copied
         assert copied not in generic_src, copied
-    shared = inspect.getsource(canonical._validate_and_write)
+    shared = inspect.getsource(canonical.write_validated_parquet)
     for owned in ("write_parquet", ".building", "staged.replace"):
         assert owned in shared, owned
 

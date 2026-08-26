@@ -1,0 +1,2 @@
+# Captured HTTP headers contain protocol-significant status-line and block whitespace.
+tests/fixtures/funding_settlement/good/headers.txt -whitespace
