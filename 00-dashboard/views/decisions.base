@@ -1,0 +1,18 @@
+# Judgment index for decisions and architecture decision records.
+# What was decided and when. Consequences live in the note body, not in a column.
+filters:
+  and:
+    - file.hasProperty("id")
+    - '!file.inFolder("templates")'
+    - 'type == "decision" || type == "adr"'
+views:
+  - type: table
+    name: Decisions
+    order:
+      - id
+      - title
+      - created
+      - tags
+    sort:
+      - property: id
+        direction: ASC

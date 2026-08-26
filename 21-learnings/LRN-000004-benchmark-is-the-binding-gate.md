@@ -1,5 +1,6 @@
 ---
 id: LRN-000004
+aliases: [LRN-000004]
 type: learning
 title: Beating the benchmark is a harder gate than any statistic
 created: 2026-08-24

@@ -1,5 +1,6 @@
 ---
 id: DEC-000001
+aliases: [DEC-000001]
 type: decision
 title: Kill EXP-000001 — BTC perp funding-rate reversal
 status: DECIDED

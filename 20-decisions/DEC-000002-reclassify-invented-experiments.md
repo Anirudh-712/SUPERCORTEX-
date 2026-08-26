@@ -1,5 +1,6 @@
 ---
 id: DEC-000002
+aliases: [DEC-000002]
 type: decision
 title: Reclassify EXP-000001 and EXP-000002 as engine validation, not research
 status: DECIDED

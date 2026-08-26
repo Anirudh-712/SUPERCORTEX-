@@ -1,5 +1,6 @@
 ---
 id: LRN-000003
+aliases: [LRN-000003]
 type: learning
 title: Validate the engine with a fixture, not a hypothesis
 created: 2026-08-24

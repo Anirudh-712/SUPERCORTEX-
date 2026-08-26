@@ -1,5 +1,6 @@
 ---
 id: ADR-011
+aliases: [ADR-011]
 type: adr
 title: OpenAlgo as the Indian broker gateway
 status: ACCEPTED (deferred to Phase 9)

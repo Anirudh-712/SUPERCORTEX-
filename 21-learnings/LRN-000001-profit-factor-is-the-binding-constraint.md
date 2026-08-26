@@ -1,5 +1,6 @@
 ---
 id: LRN-000001
+aliases: [LRN-000001]
 type: learning
 title: Profit factor, not Sharpe, is the binding constraint for an Indian VDA desk
 created: 2026-08-24

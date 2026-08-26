@@ -1,0 +1,18 @@
+# Judgment index for learnings — what this desk now knows and why.
+filters:
+  and:
+    - file.hasProperty("id")
+    - '!file.inFolder("templates")'
+    - 'type == "learning"'
+views:
+  - type: table
+    name: Learnings
+    order:
+      - id
+      - title
+      - created
+      - source
+      - tags
+    sort:
+      - property: id
+        direction: DESC

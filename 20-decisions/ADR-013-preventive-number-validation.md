@@ -1,5 +1,6 @@
 ---
 id: ADR-013
+aliases: [ADR-013]
 type: adr
 title: Move the fabricated-number validator from detective to preventive
 status: ACCEPTED — implemented

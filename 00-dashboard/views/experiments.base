@@ -1,0 +1,23 @@
+# Judgment index for experiments — one row per experiment, not one per document.
+# The canonical `type: experiment-index` note links to its own hypothesis, methodology,
+# results and decision, so listing every `type: experiment` document here would produce
+# several indistinguishable rows for the same experiment.
+# Trial counts, budgets, lifecycle state and falsification verdicts are registry facts and
+# appear on the generated Pipeline page — never here, where they could go stale.
+filters:
+  and:
+    - file.hasProperty("id")
+    - '!file.inFolder("templates")'
+    - 'type == "experiment-index"'
+views:
+  - type: table
+    name: Experiments
+    order:
+      - id
+      - title
+      - type
+      - created
+      - tags
+    sort:
+      - property: id
+        direction: ASC

@@ -1,0 +1,22 @@
+# Stable identity for registered datasets.
+# Rows, completeness, gap inventory, hashes and verification state are registry facts and
+# appear on the generated Evidence page. A dataset card is itself generated: treat every
+# column here as identity, never as a measurement.
+filters:
+  and:
+    - file.hasProperty("id")
+    - '!file.inFolder("templates")'
+    - 'type == "dataset"'
+views:
+  - type: table
+    name: Datasets
+    order:
+      - id
+      - title
+      - venue
+      - symbol
+      - interval
+      - kind
+    sort:
+      - property: id
+        direction: ASC

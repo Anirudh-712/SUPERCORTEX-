@@ -1,5 +1,6 @@
 ---
 id: LRN-000002
+aliases: [LRN-000002]
 type: learning
 title: Mean reversion is the wrong skew for an Indian VDA desk
 created: 2026-08-24

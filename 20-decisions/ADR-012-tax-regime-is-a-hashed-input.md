@@ -1,5 +1,6 @@
 ---
 id: ADR-012
+aliases: [ADR-012]
 type: adr
 title: The tax regime is a modelled input, not an assumption
 status: ACCEPTED

@@ -1,5 +1,6 @@
 ---
 id: ADR-014
+aliases: [ADR-014]
 type: adr
 title: Stay on NautilusTrader v1 and keep its mypy errors visible
 status: ACCEPTED
