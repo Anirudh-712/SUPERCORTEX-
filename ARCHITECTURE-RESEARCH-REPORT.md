@@ -1915,14 +1915,14 @@ DATABASES
   <key>Label</key><string>com.supercortex.health</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/anirudhtumuluru/.local/bin/uv</string>
+    <string>/Users/YOU/.local/bin/uv</string>
     <string>run</string><string>--project</string>
-    <string>/Users/anirudhtumuluru/Quant-desk</string>
+    <string>/Users/YOU/Quant-desk</string>
     <string>supercortex</string><string>health</string>
   </array>
   <key>StartInterval</key><integer>300</integer>
-  <key>StandardOutPath</key><string>/Users/anirudhtumuluru/Quant-desk/logs/health.log</string>
-  <key>StandardErrorPath</key><string>/Users/anirudhtumuluru/Quant-desk/logs/health.err</string>
+  <key>StandardOutPath</key><string>/Users/YOU/Quant-desk/logs/health.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Quant-desk/logs/health.err</string>
 </dict></plist>
 ```
 

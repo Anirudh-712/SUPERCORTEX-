@@ -3,6 +3,9 @@
 An AI-native quantitative research desk for one person, one Mac Mini.
 Crypto first. Local-first. **Research is autonomous; capital is not.**
 
+Research software: backtests and simulations only, no live trading or order routing. Nothing here is financial
+or tax advice; the cost model encodes one reading of Indian VDA tax rules, which are still unsettled.
+
 - Design study, dated 2026-08-24, written before anything was built:
   [`ARCHITECTURE-RESEARCH-REPORT.md`](ARCHITECTURE-RESEARCH-REPORT.md). It records the
   reasoning behind the tool choices. Parts of the layout it sketches are still unbuilt —

@@ -38,3 +38,7 @@ CLAUDE.local.md
 *.sqlite-wal
 *.sqlite-shm
 .doctor-probe.sqlite*
+
+# build output and personal editor state
+.coverage
+.obsidian/workspace.json
